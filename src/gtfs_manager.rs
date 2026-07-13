@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::state::{AppState, LoadedGtfs};
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use gtfs_structures::Gtfs;
@@ -30,7 +30,7 @@ pub async fn start_gtfs_updater(state: Arc<AppState>, url: String) -> Result<()>
                 gtfs.routes.len(),
             );
 
-            publish_gtfs(&state, gtfs).await;
+            publish_gtfs(&state, gtfs).await?;
             true
         }
 
@@ -52,7 +52,7 @@ pub async fn start_gtfs_updater(state: Arc<AppState>, url: String) -> Result<()>
                 gtfs.routes.len(),
             );
 
-            publish_gtfs(&state, gtfs).await;
+            publish_gtfs(&state, gtfs).await?;
             false
         }
     };
@@ -78,7 +78,11 @@ pub async fn start_gtfs_updater(state: Arc<AppState>, url: String) -> Result<()>
                         gtfs.routes.len(),
                     );
 
-                    publish_gtfs(&state, gtfs).await;
+                    if let Err(error) = publish_gtfs(&state, gtfs).await {
+                        eprintln!(
+                            "Failed to build GTFS matching index; retaining existing dataset: {error:#}"
+                        );
+                    }
                 }
 
                 Err(error) => {
@@ -216,7 +220,18 @@ async fn download_validate_and_replace(url: &str, cache_path: &Path) -> Result<G
     Ok(gtfs)
 }
 
-async fn publish_gtfs(state: &Arc<AppState>, gtfs: Gtfs) {
+async fn publish_gtfs(state: &Arc<AppState>, gtfs: Gtfs) -> Result<()> {
+    let loaded_gtfs = tokio::task::spawn_blocking(move || LoadedGtfs::new(gtfs))
+        .await
+        .context("GTFS matching-index task panicked")?;
+
+    println!(
+        "Built GTFS matching index with {} unique directions",
+        loaded_gtfs.match_index.direction_count()
+    );
+
     let mut lock = state.gtfs.write().await;
-    *lock = Some(Arc::new(gtfs));
+    *lock = Some(Arc::new(loaded_gtfs));
+
+    Ok(())
 }

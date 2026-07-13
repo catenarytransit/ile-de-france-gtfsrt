@@ -38,6 +38,8 @@ pub struct EstimatedVehicleJourney {
     pub line_ref: Option<ValueWrapper>,
     #[serde(rename = "DirectionName")]
     pub direction_name: Option<Vec<ValueWrapper>>,
+    #[serde(rename = "DestinationRef")]
+    pub destination_ref: Option<ValueWrapper>,
     #[serde(rename = "EstimatedCalls")]
     pub estimated_calls: Option<EstimatedCalls>,
 }
