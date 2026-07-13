@@ -1,0 +1,17 @@
+[package]
+name = "ile-de-france-gtfsrt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+chrono = "0.4.45"
+dashmap = "6.2.1"
+gtfs-realtime = "0.2.0"
+gtfs-structures = "0.48.2"
+prost = "0.14.4"
+reqwest = { version = "0.13.4", features = ["json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1.52.3", features = ["full"] }
+warp = "0.3"
