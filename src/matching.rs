@@ -38,8 +38,20 @@ pub struct GtfsMatchIndex {
 #[derive(Debug)]
 struct ObservedCall {
     stop_id: String,
+    aimed_arrival: Option<i64>,
+    aimed_departure: Option<i64>,
     expected_arrival: Option<i64>,
     expected_departure: Option<i64>,
+}
+
+impl ObservedCall {
+    fn matching_arrival(&self) -> Option<i64> {
+        self.aimed_arrival.or(self.expected_arrival)
+    }
+
+    fn matching_departure(&self) -> Option<i64> {
+        self.aimed_departure.or(self.expected_departure)
+    }
 }
 
 #[derive(Debug)]
@@ -229,8 +241,9 @@ impl GtfsMatchIndex {
             })
             .collect::<Vec<_>>();
 
+        // When LineRef is present, never accept an exact-ID candidate from another route.
         if candidates.is_empty() {
-            candidates = indexed_trip_ids.iter().collect();
+            return None;
         }
 
         if let Some(destination_stop_id) = target_destination.as_ref() {
@@ -296,7 +309,7 @@ impl GtfsMatchIndex {
         gtfs: &Gtfs,
         observed_calls: &[ObservedCall],
     ) -> Option<JourneyMatch> {
-        if observed_calls.is_empty() || !has_expected_time(observed_calls) {
+        if observed_calls.is_empty() || !has_matching_time(observed_calls) {
             return None;
         }
 
@@ -329,21 +342,26 @@ impl GtfsMatchIndex {
         let mut best_score: Option<CandidateScore> = None;
 
         for pattern in candidate_patterns {
-            for start_index in alignment_starts(&pattern.stop_ids, observed_calls) {
-                for trip_id in &pattern.trip_ids {
-                    let Some(trip) = gtfs.trips.get(trip_id) else {
+            let alignments = alignment_indices(&pattern.stop_ids, observed_calls);
+            if alignments.is_empty() {
+                continue;
+            }
+
+            for trip_id in &pattern.trip_ids {
+                let Some(trip) = gtfs.trips.get(trip_id) else {
+                    continue;
+                };
+
+                for service_date in &service_dates {
+                    if !self.service_runs_on(gtfs, &trip.service_id, *service_date) {
                         continue;
-                    };
+                    }
 
-                    for service_date in &service_dates {
-                        if !self.service_runs_on(gtfs, &trip.service_id, *service_date) {
-                            continue;
-                        }
-
+                    for stop_indices in &alignments {
                         let Some(score) = score_alignment(
                             trip,
                             observed_calls,
-                            start_index,
+                            stop_indices,
                             *service_date,
                             timezone,
                         ) else {
@@ -376,7 +394,7 @@ impl GtfsMatchIndex {
         timezone: Tz,
         gtfs: &Gtfs,
     ) -> Option<CandidateScore> {
-        if observed_calls.is_empty() || !has_expected_time(observed_calls) {
+        if observed_calls.is_empty() || !has_matching_time(observed_calls) {
             return None;
         }
 
@@ -388,7 +406,7 @@ impl GtfsMatchIndex {
         let service_dates = candidate_service_dates(observed_calls, timezone)?;
         let mut best_score: Option<CandidateScore> = None;
 
-        for start_index in alignment_starts_str(&trip_stop_ids, observed_calls) {
+        for stop_indices in alignment_indices(&trip_stop_ids, observed_calls) {
             for service_date in &service_dates {
                 if !self.service_runs_on(gtfs, &trip.service_id, *service_date) {
                     continue;
@@ -397,7 +415,7 @@ impl GtfsMatchIndex {
                 let Some(score) = score_alignment(
                     trip,
                     observed_calls,
-                    start_index,
+                    &stop_indices,
                     *service_date,
                     timezone,
                 ) else {
@@ -489,6 +507,14 @@ fn observed_calls(journey: &EstimatedVehicleJourney) -> Vec<ObservedCall> {
 
             Some(ObservedCall {
                 stop_id,
+                aimed_arrival: call
+                    .aimed_arrival_time
+                    .as_deref()
+                    .and_then(parse_timestamp),
+                aimed_departure: call
+                    .aimed_departure_time
+                    .as_deref()
+                    .and_then(parse_timestamp),
                 expected_arrival: call
                     .expected_arrival_time
                     .as_deref()
@@ -508,9 +534,9 @@ fn parse_timestamp(value: &str) -> Option<i64> {
         .map(|date_time| date_time.timestamp())
 }
 
-fn has_expected_time(observed_calls: &[ObservedCall]) -> bool {
+fn has_matching_time(observed_calls: &[ObservedCall]) -> bool {
     observed_calls.iter().any(|call| {
-        call.expected_arrival.is_some() || call.expected_departure.is_some()
+        call.matching_arrival().is_some() || call.matching_departure().is_some()
     })
 }
 
@@ -520,7 +546,7 @@ fn candidate_service_dates(
 ) -> Option<Vec<NaiveDate>> {
     let earliest_timestamp = observed_calls
         .iter()
-        .flat_map(|call| [call.expected_arrival, call.expected_departure])
+        .flat_map(|call| [call.matching_arrival(), call.matching_departure()])
         .flatten()
         .min()?;
     let local_date = Utc
@@ -536,54 +562,84 @@ fn candidate_service_dates(
     )
 }
 
-fn alignment_starts(stop_ids: &[String], observed_calls: &[ObservedCall]) -> Vec<usize> {
-    if observed_calls.len() > stop_ids.len() {
-        return Vec::new();
-    }
-
-    (0..=stop_ids.len() - observed_calls.len())
-        .filter(|start| {
-            observed_calls.iter().enumerate().all(|(offset, call)| {
-                stop_ids[*start + offset] == call.stop_id
-            })
-        })
-        .collect()
+fn alignment_indices<S: AsRef<str>>(
+    stop_ids: &[S],
+    observed_calls: &[ObservedCall],
+) -> Vec<Vec<usize>> {
+    let mut alignments = Vec::new();
+    let mut current = Vec::with_capacity(observed_calls.len());
+    collect_alignment_indices(
+        stop_ids,
+        observed_calls,
+        0,
+        0,
+        &mut current,
+        &mut alignments,
+    );
+    alignments
 }
 
-fn alignment_starts_str(stop_ids: &[&str], observed_calls: &[ObservedCall]) -> Vec<usize> {
-    if observed_calls.len() > stop_ids.len() {
-        return Vec::new();
+fn collect_alignment_indices<S: AsRef<str>>(
+    stop_ids: &[S],
+    observed_calls: &[ObservedCall],
+    call_index: usize,
+    search_from: usize,
+    current: &mut Vec<usize>,
+    alignments: &mut Vec<Vec<usize>>,
+) {
+    if call_index == observed_calls.len() {
+        alignments.push(current.clone());
+        return;
     }
 
-    (0..=stop_ids.len() - observed_calls.len())
-        .filter(|start| {
-            observed_calls.iter().enumerate().all(|(offset, call)| {
-                stop_ids[*start + offset] == call.stop_id
-            })
-        })
-        .collect()
+    let remaining_calls = observed_calls.len() - call_index;
+    if stop_ids.len().saturating_sub(search_from) < remaining_calls {
+        return;
+    }
+
+    let last_candidate = stop_ids.len() - remaining_calls;
+    for stop_index in search_from..=last_candidate {
+        if stop_ids[stop_index].as_ref() != observed_calls[call_index].stop_id.as_str() {
+            continue;
+        }
+
+        current.push(stop_index);
+        collect_alignment_indices(
+            stop_ids,
+            observed_calls,
+            call_index + 1,
+            stop_index + 1,
+            current,
+            alignments,
+        );
+        current.pop();
+    }
 }
 
 fn score_alignment(
     trip: &Trip,
     observed_calls: &[ObservedCall],
-    start_index: usize,
+    stop_indices: &[usize],
     service_date: NaiveDate,
     timezone: Tz,
 ) -> Option<CandidateScore> {
+    if stop_indices.len() != observed_calls.len() {
+        return None;
+    }
+
     let mut total_difference: i128 = 0;
     let mut max_difference = 0_i64;
     let mut comparisons = 0_usize;
 
-    for (offset, observed_call) in observed_calls.iter().enumerate() {
-        let stop_time = trip.stop_times.get(start_index + offset)?;
+    for (observed_call, stop_index) in observed_calls.iter().zip(stop_indices) {
+        let stop_time = trip.stop_times.get(*stop_index)?;
 
-        if let (Some(expected), Some(scheduled_seconds)) = (
-            observed_call.expected_arrival,
+        if let (Some(observed), Some(scheduled_seconds)) = (
+            observed_call.matching_arrival(),
             stop_time.arrival_time.or(stop_time.departure_time),
         ) {
             if let Some(difference) = minimum_time_difference(
-                expected,
+                observed,
                 service_date,
                 scheduled_seconds,
                 timezone,
@@ -594,12 +650,12 @@ fn score_alignment(
             }
         }
 
-        if let (Some(expected), Some(scheduled_seconds)) = (
-            observed_call.expected_departure,
+        if let (Some(observed), Some(scheduled_seconds)) = (
+            observed_call.matching_departure(),
             stop_time.departure_time.or(stop_time.arrival_time),
         ) {
             if let Some(difference) = minimum_time_difference(
-                expected,
+                observed,
                 service_date,
                 scheduled_seconds,
                 timezone,
@@ -659,5 +715,68 @@ fn scheduled_timestamps(
             vec![first.timestamp(), second.timestamp()]
         }
         LocalResult::None => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observed_call(stop_id: &str) -> ObservedCall {
+        ObservedCall {
+            stop_id: stop_id.to_string(),
+            aimed_arrival: None,
+            aimed_departure: None,
+            expected_arrival: Some(0),
+            expected_departure: None,
+        }
+    }
+
+    #[test]
+    fn aligns_omitted_calls_as_an_ordered_subsequence() {
+        let stop_ids = ["A", "B", "C", "D", "E", "F"];
+        let observed_calls = [
+            observed_call("B"),
+            observed_call("D"),
+            observed_call("F"),
+        ];
+
+        assert_eq!(
+            alignment_indices(&stop_ids, &observed_calls),
+            vec![vec![1, 3, 5]]
+        );
+    }
+
+    #[test]
+    fn keeps_all_ordered_alignments_for_repeated_stops() {
+        let stop_ids = ["A", "B", "C", "B", "D"];
+        let observed_calls = [observed_call("B"), observed_call("D")];
+
+        assert_eq!(
+            alignment_indices(&stop_ids, &observed_calls),
+            vec![vec![1, 4], vec![3, 4]]
+        );
+    }
+
+    #[test]
+    fn rejects_calls_whose_order_does_not_match_the_trip() {
+        let stop_ids = ["A", "B", "C", "D"];
+        let observed_calls = [observed_call("D"), observed_call("B")];
+
+        assert!(alignment_indices(&stop_ids, &observed_calls).is_empty());
+    }
+
+    #[test]
+    fn aimed_times_take_precedence_over_expected_times() {
+        let call = ObservedCall {
+            stop_id: "B".to_string(),
+            aimed_arrival: Some(100),
+            aimed_departure: Some(110),
+            expected_arrival: Some(130),
+            expected_departure: Some(140),
+        };
+
+        assert_eq!(call.matching_arrival(), Some(100));
+        assert_eq!(call.matching_departure(), Some(110));
     }
 }

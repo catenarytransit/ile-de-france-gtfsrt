@@ -3,8 +3,11 @@ use crate::siri_models::{EstimatedVehicleJourney, SiriResponse};
 use crate::state::{AppState, PlatformInfo};
 use chrono::{DateTime, Utc};
 use gtfs_realtime::{
-    FeedEntity, FeedHeader, FeedMessage, TripDescriptor, TripUpdate, trip_update::StopTimeEvent,
-    trip_update::StopTimeUpdate,
+    FeedEntity, FeedHeader, FeedMessage, TripDescriptor, TripUpdate,
+    trip_update::{
+        StopTimeEvent, StopTimeUpdate,
+        stop_time_update::ScheduleRelationship as StopTimeScheduleRelationship,
+    },
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -79,6 +82,15 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                     for call in &calls.estimated_call {
                         let mut stu = StopTimeUpdate::default();
 
+                        if call
+                            .arrival_status
+                            .as_deref()
+                            .is_some_and(is_cancelled_status)
+                            || call.departure_status.as_deref().is_some_and(is_cancelled_status)
+                        {
+                            stu.schedule_relationship = Some(StopTimeScheduleRelationship::Skipped as i32);
+                        }
+
                         if let Some(stop_ref) = &call.stop_point_ref {
                             // Extract GTFS stop_id from STIF:StopPoint:Q:30785:
                             // Result should be IDFM:30785.
@@ -105,9 +117,13 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                             }
                         }
 
-                        // IDFM's feed does not reliably provide aimed times. Emit and
-                        // match against expected timestamps only.
-                        if let Some(time_str) = call.expected_arrival_time.as_ref() {
+                        // Prefer a realtime prediction, but use the aimed schedule time
+                        // when IDFM does not provide an expected timestamp.
+                        if let Some(time_str) = call
+                            .expected_arrival_time
+                            .as_ref()
+                            .or(call.aimed_arrival_time.as_ref())
+                        {
                             if let Ok(date_time) = DateTime::parse_from_rfc3339(time_str) {
                                 let mut event = StopTimeEvent::default();
                                 event.time = Some(date_time.timestamp());
@@ -115,7 +131,11 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                             }
                         }
 
-                        if let Some(time_str) = call.expected_departure_time.as_ref() {
+                        if let Some(time_str) = call
+                            .expected_departure_time
+                            .as_ref()
+                            .or(call.aimed_departure_time.as_ref())
+                        {
                             if let Ok(date_time) = DateTime::parse_from_rfc3339(time_str) {
                                 let mut event = StopTimeEvent::default();
                                 event.time = Some(date_time.timestamp());
@@ -171,8 +191,12 @@ fn build_missed_example(journey: &EstimatedVehicleJourney) -> serde_json::Value 
                             .stop_point_ref
                             .as_ref()
                             .map(|value| value.value.as_str()),
+                        "aimed_arrival_time": call.aimed_arrival_time.as_deref(),
+                        "aimed_departure_time": call.aimed_departure_time.as_deref(),
                         "expected_arrival_time": call.expected_arrival_time.as_deref(),
                         "expected_departure_time": call.expected_departure_time.as_deref(),
+                        "arrival_status": call.arrival_status.as_deref(),
+                        "departure_status": call.departure_status.as_deref(),
                     })
                 })
                 .collect::<Vec<_>>()
@@ -226,4 +250,21 @@ async fn append_missed_examples(path: &str, examples: &[serde_json::Value]) -> s
     file.flush().await?;
 
     Ok(())
+}
+
+fn is_cancelled_status(status: &str) -> bool {
+    status.eq_ignore_ascii_case("CANCELLED") || status.eq_ignore_ascii_case("CANCELED")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_cancelled_status;
+
+    #[test]
+    fn recognises_cancelled_siri_statuses() {
+        assert!(is_cancelled_status("CANCELLED"));
+        assert!(is_cancelled_status("cancelled"));
+        assert!(is_cancelled_status("CANCELED"));
+        assert!(!is_cancelled_status("ON_TIME"));
+    }
 }
