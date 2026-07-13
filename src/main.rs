@@ -2,6 +2,7 @@ mod downloader;
 mod gtfs_manager;
 mod keys;
 mod matching;
+mod matching_diagnostics;
 mod processor;
 mod siri_models;
 mod state;

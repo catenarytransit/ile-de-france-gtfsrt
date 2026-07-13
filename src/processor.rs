@@ -1,4 +1,5 @@
 use crate::matching::{MatchKind, MatchMissReason};
+use crate::matching_diagnostics::StopAlignmentDiagnostics;
 use crate::siri_models::{EstimatedVehicleJourney, SiriResponse};
 use crate::state::{AppState, PlatformInfo};
 use chrono::{DateTime, Utc};
@@ -14,9 +15,10 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncWriteExt;
 
 pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
-    const MAX_MISSED_EXAMPLES: usize = 50;
+    const MAX_MISSED_EXAMPLES_PER_REASON: usize = 20;
 
     let mut missed_examples = Vec::new();
+    let mut missed_examples_by_reason = HashMap::<&'static str, usize>::new();
 
     let mut feed_msg = FeedMessage::default();
     let mut header = FeedHeader::default();
@@ -28,7 +30,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
     let mut sequence_matches = 0;
     let mut parent_station_matches = 0;
     let mut unmatched = 0;
-    let mut missed_by_reason = HashMap::<MatchMissReason, usize>::new();
+    let mut missed_by_reason = HashMap::<&'static str, usize>::new();
     let mut scored_matches = 0_u64;
     let mut total_mean_difference_seconds = 0_i128;
 
@@ -52,11 +54,30 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                 let matched = match match_index.match_journey(&journey, gtfs) {
                     Ok(matched) => matched,
                     Err(reason) => {
-                        unmatched += 1;
-                        *missed_by_reason.entry(reason).or_default() += 1;
+                        let stop_alignment = if reason == MatchMissReason::NoStopAlignment {
+                            match_index.diagnose_stop_alignment(&journey)
+                        } else {
+                            None
+                        };
+                        let reason_name = stop_alignment
+                            .as_ref()
+                            .map(|diagnostics| diagnostics.kind.as_str())
+                            .unwrap_or_else(|| reason.as_str());
 
-                        if missed_examples.len() < MAX_MISSED_EXAMPLES {
-                            missed_examples.push(build_missed_example(&journey, reason));
+                        unmatched += 1;
+                        *missed_by_reason.entry(reason_name).or_default() += 1;
+
+                        let sampled = missed_examples_by_reason
+                            .entry(reason_name)
+                            .or_default();
+                        if *sampled < MAX_MISSED_EXAMPLES_PER_REASON {
+                            missed_examples.push(build_missed_example(
+                                &journey,
+                                reason,
+                                reason_name,
+                                stop_alignment.as_ref(),
+                            ));
+                            *sampled += 1;
                         }
 
                         continue;
@@ -201,12 +222,12 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
 
     if !missed_by_reason.is_empty() {
         let mut reasons = missed_by_reason.into_iter().collect::<Vec<_>>();
-        reasons.sort_unstable_by_key(|(reason, _)| reason.as_str());
+        reasons.sort_unstable_by(|left, right| left.0.cmp(right.0));
         println!(
             "Miss reasons: {}",
             reasons
                 .into_iter()
-                .map(|(reason, count)| format!("{}={count}", reason.as_str()))
+                .map(|(reason, count)| format!("{reason}={count}"))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -218,7 +239,9 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
 
 fn build_missed_example(
     journey: &EstimatedVehicleJourney,
-    reason: MatchMissReason,
+    original_reason: MatchMissReason,
+    reason: &str,
+    stop_alignment: Option<&StopAlignmentDiagnostics>,
 ) -> serde_json::Value {
     let calls = journey
         .estimated_calls
@@ -247,7 +270,9 @@ fn build_missed_example(
 
     json!({
         "logged_at": Utc::now().to_rfc3339(),
-        "reason": reason.as_str(),
+        "reason": reason,
+        "original_reason": original_reason.as_str(),
+        "stop_alignment": stop_alignment,
 
         "dated_vehicle_journey_ref": journey
             .dated_vehicle_journey_ref

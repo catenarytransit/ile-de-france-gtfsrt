@@ -1,3 +1,6 @@
+use crate::matching_diagnostics::{
+    StopAlignmentDiagnostics, diagnose_stop_alignment as analyze_stop_alignment,
+};
 use crate::siri_models::EstimatedVehicleJourney;
 use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::{Europe::Paris, Tz};
@@ -236,6 +239,79 @@ impl GtfsMatchIndex {
 
     pub fn direction_count(&self) -> usize {
         self.directions.values().map(Vec::len).sum()
+    }
+
+    /// Explain why the ordered stop sequence could not be aligned.
+    ///
+    /// This is intentionally called only after normal exact and parent-station
+    /// matching fail. The LCS work performed by the diagnostic path is more
+    /// expensive than the normal matcher and must not be part of every match.
+    pub fn diagnose_stop_alignment(
+        &self,
+        journey: &EstimatedVehicleJourney,
+    ) -> Option<StopAlignmentDiagnostics> {
+        let observed_calls = observed_calls(journey);
+        if observed_calls.is_empty() {
+            return None;
+        }
+
+        let target_route_id = journey
+            .line_ref
+            .as_ref()
+            .and_then(|reference| extract_idfm_id(&reference.value))?;
+        let patterns = self.directions.get(&target_route_id)?;
+        let target_destination = journey
+            .destination_ref
+            .as_ref()
+            .and_then(|reference| extract_idfm_id(&reference.value));
+
+        let mut candidate_patterns = patterns.iter().collect::<Vec<_>>();
+        let mut destination_filter_applied = false;
+
+        if let Some(destination) = target_destination.as_ref() {
+            let exact = patterns
+                .iter()
+                .filter(|pattern| pattern.destination_stop_id == *destination)
+                .collect::<Vec<_>>();
+
+            if !exact.is_empty() {
+                destination_filter_applied = exact.len() < patterns.len();
+                candidate_patterns = exact;
+            } else {
+                let parent = patterns
+                    .iter()
+                    .filter(|pattern| {
+                        self.stops_equivalent(&pattern.destination_stop_id, destination)
+                    })
+                    .collect::<Vec<_>>();
+
+                if !parent.is_empty() {
+                    destination_filter_applied = parent.len() < patterns.len();
+                    candidate_patterns = parent;
+                }
+            }
+        }
+
+        let observed_stop_ids = observed_calls
+            .into_iter()
+            .map(|call| call.stop_id)
+            .collect::<Vec<_>>();
+        let candidate_stop_patterns = candidate_patterns
+            .iter()
+            .map(|pattern| pattern.stop_ids.as_slice())
+            .collect::<Vec<_>>();
+        let all_stop_patterns = patterns
+            .iter()
+            .map(|pattern| pattern.stop_ids.as_slice())
+            .collect::<Vec<_>>();
+
+        Some(analyze_stop_alignment(
+            &observed_stop_ids,
+            &candidate_stop_patterns,
+            &all_stop_patterns,
+            &self.canonical_stop_ids,
+            destination_filter_applied,
+        ))
     }
 
     pub fn match_journey(
