@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.103"
 chrono = "0.4.45"
+chrono-tz = "0.10.4"
 dashmap = "6.2.1"
 futures-util = "0.3.32"
 gtfs-realtime = "0.2.0"
