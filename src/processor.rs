@@ -97,10 +97,12 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                                         .or(call.arrival_platform_name.as_ref())
                                         .map(|s| s.value.clone());
                                     if let Some(platform_name) = platform_name {
-                                        platforms.push(PlatformInfo {
+                                        if platform_name != "unknown" {
+                                            platforms.push(PlatformInfo {
                                             stop_id: gtfs_stop_id,
                                             platform_name: platform_name.to_string(),
                                         });
+                                        }
                                     }
                                 }
                             }
