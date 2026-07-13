@@ -1,5 +1,5 @@
 use crate::keys::KeyManager;
-use crate::processor::process_siri;
+use crate::enhanced_processor::process_siri;
 use crate::siri_models::SiriResponse;
 use crate::state::AppState;
 use reqwest::Client;
@@ -18,11 +18,22 @@ pub async fn start_downloader(state: Arc<AppState>, key_manager: Arc<KeyManager>
 
             match response_result {
                 Ok(response) if response.status().is_success() => {
-                    match response.json::<SiriResponse>().await {
-                        Ok(siri_payload) => {
+                    match response.text().await {
+                        Ok(siri_payload_text) => {
+                            let siri_payload_result: Result<SiriResponse, _> =
+                                serde_json::from_str(&siri_payload_text);
+
+                            match siri_payload_result {
+                                Ok(siri_payload) => {
+
                             println!("Successfully fetched and parsed SIRI payload.");
                             // Process payload into state
                             process_siri(state.clone(), siri_payload).await;
+                                },
+                                Err(e) => {
+                                    eprintln!("Failed to parse SIRI JSON: {}", e);
+                                }
+                            }
                         }
                         Err(e) => {
                             eprintln!("Failed to parse SIRI JSON: {}", e);

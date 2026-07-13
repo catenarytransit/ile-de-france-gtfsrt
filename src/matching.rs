@@ -257,12 +257,12 @@ impl GtfsMatchIndex {
         let target_route_id = journey
             .line_ref
             .as_ref()
-            .and_then(|reference| extract_idfm_id(&reference.value))?;
+            .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id))?;
         let patterns = self.directions.get(&target_route_id)?;
         let target_destination = journey
             .destination_ref
             .as_ref()
-            .and_then(|reference| extract_idfm_id(&reference.value));
+            .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id));
 
         let mut candidate_patterns = patterns.iter().collect::<Vec<_>>();
         let mut destination_filter_applied = false;
@@ -336,16 +336,16 @@ impl GtfsMatchIndex {
         let exact_key = journey
             .dated_vehicle_journey_ref
             .as_ref()
-            .and_then(|reference| extract_siri_trip_key(&reference.value))?;
+            .and_then(|reference| reference.value.as_deref().and_then(extract_siri_trip_key))?;
         let indexed_trip_ids = self.exact_trip_ids.get(exact_key)?;
         let target_route_id = journey
             .line_ref
             .as_ref()
-            .and_then(|reference| extract_idfm_id(&reference.value));
+            .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id));
         let target_destination = journey
             .destination_ref
             .as_ref()
-            .and_then(|reference| extract_idfm_id(&reference.value));
+            .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id));
 
         let mut candidates = indexed_trip_ids
             .iter()
@@ -446,7 +446,7 @@ impl GtfsMatchIndex {
         let target_route_id = journey
             .line_ref
             .as_ref()
-            .and_then(|reference| extract_idfm_id(&reference.value))
+            .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id))
             .ok_or(MatchMissReason::MissingLineRef)?;
         let patterns = self
             .directions
@@ -455,7 +455,7 @@ impl GtfsMatchIndex {
         let target_destination = journey
             .destination_ref
             .as_ref()
-            .and_then(|reference| extract_idfm_id(&reference.value));
+            .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id));
 
         let exact_destination_patterns = target_destination.as_ref().map(|destination| {
             patterns
@@ -756,7 +756,7 @@ fn observed_calls(journey: &EstimatedVehicleJourney) -> Vec<ObservedCall> {
             let stop_id = call
                 .stop_point_ref
                 .as_ref()
-                .and_then(|reference| extract_idfm_id(&reference.value))?;
+                .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id))?;
 
             Some(ObservedCall {
                 stop_id,

@@ -132,7 +132,12 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                         let siri_stop_id = call
                             .stop_point_ref
                             .as_ref()
-                            .and_then(|stop_ref| siri_stop_ref_to_gtfs_stop_id(&stop_ref.value));
+                            .and_then(|stop_ref| {
+                                stop_ref
+                                    .value
+                                    .as_deref()
+                                    .and_then(siri_stop_ref_to_gtfs_stop_id)
+                            });
 
                         let gtfs_stop_id = siri_stop_id.as_ref().map(|siri_stop_id| {
                             let matched_stop_id = matched
@@ -153,7 +158,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                                 .departure_platform_name
                                 .as_ref()
                                 .or(call.arrival_platform_name.as_ref())
-                                .map(|value| value.value.as_str());
+                                .and_then(|value| value.value.as_deref());
 
                             if let Some(platform_name) = platform_name {
                                 if platform_name != "unknown" {
@@ -259,7 +264,7 @@ fn build_missed_example(
                         "stop_point_ref": call
                             .stop_point_ref
                             .as_ref()
-                            .map(|value| value.value.as_str()),
+                            .and_then(|value| value.value.as_deref()),
                         "aimed_arrival_time": call.aimed_arrival_time.as_deref(),
                         "aimed_departure_time": call.aimed_departure_time.as_deref(),
                         "expected_arrival_time": call.expected_arrival_time.as_deref(),
@@ -281,17 +286,17 @@ fn build_missed_example(
         "dated_vehicle_journey_ref": journey
             .dated_vehicle_journey_ref
             .as_ref()
-            .map(|value| value.value.as_str()),
+            .and_then(|value| value.value.as_deref()),
 
         "line_ref": journey
             .line_ref
             .as_ref()
-            .map(|value| value.value.as_str()),
+            .and_then(|value| value.value.as_deref()),
 
         "destination_ref": journey
             .destination_ref
             .as_ref()
-            .map(|value| value.value.as_str()),
+            .and_then(|value| value.value.as_deref()),
 
         "calls": calls,
     })
@@ -414,7 +419,7 @@ mod tests {
 
         let stop_ids = calls
             .iter()
-            .map(|call| call.stop_point_ref.as_ref().unwrap().value.as_str())
+            .map(|call| call.stop_point_ref.as_ref().unwrap().value.as_deref().unwrap())
             .collect::<Vec<_>>();
 
         assert_eq!(
