@@ -5,7 +5,8 @@ use std::io::BufReader;
 
 fn main() {
     println!("Loading GTFS...");
-    let gtfs = Gtfs::from_url("https://eu.ftp.opendatasoft.com/stif/GTFS/IDFM-gtfs.zip").expect("Failed to load GTFS");
+    let gtfs = Gtfs::from_url("https://eu.ftp.opendatasoft.com/stif/GTFS/IDFM-gtfs.zip")
+        .expect("Failed to load GTFS");
     println!("GTFS loaded. Total trips: {}", gtfs.trips.len());
 
     let mut with_short_name = 0;
@@ -43,7 +44,7 @@ fn main() {
                     if !names.is_empty() {
                         total_with_name += 1;
                         let val = names[0]["value"].as_str().unwrap();
-                        
+
                         // Try to find a matching trip by trip_short_name
                         let mut matched = false;
                         for (_id, trip) in &gtfs.trips {

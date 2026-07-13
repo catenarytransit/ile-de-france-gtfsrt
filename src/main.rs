@@ -13,7 +13,8 @@ use std::sync::Arc;
 use warp::Filter;
 
 const GTFS_URL: &str = "https://eu.ftp.opendatasoft.com/stif/GTFS/IDFM-gtfs.zip";
-const SIRI_URL: &str = "https://prim.iledefrance-mobilites.fr/marketplace/estimated-timetable?LineRef=ALL";
+const SIRI_URL: &str =
+    "https://prim.iledefrance-mobilites.fr/marketplace/estimated-timetable?LineRef=ALL";
 const KEYS_FILE: &str = "keys.txt";
 
 #[tokio::main]
@@ -24,7 +25,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState::new());
 
     // Start background GTFS update loop
-    gtfs_manager::start_gtfs_updater(state.clone(), GTFS_URL.to_string()).await;
+    gtfs_manager::start_gtfs_updater(state.clone(), GTFS_URL.to_string()).await?;
 
     // Start background SIRI downloader loop
     downloader::start_downloader(state.clone(), key_manager, SIRI_URL.to_string()).await;

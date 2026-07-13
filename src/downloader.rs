@@ -14,11 +14,7 @@ pub async fn start_downloader(state: Arc<AppState>, key_manager: Arc<KeyManager>
             let api_key = key_manager.get_next_key();
             println!("Fetching SIRI feed with key {}...", &api_key[0..5]); // debug print part of key
 
-            let response_result = client
-                .get(&url)
-                .header("apikey", api_key)
-                .send()
-                .await;
+            let response_result = client.get(&url).header("apikey", api_key).send().await;
 
             match response_result {
                 Ok(response) if response.status().is_success() => {

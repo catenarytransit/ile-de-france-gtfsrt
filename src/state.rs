@@ -1,8 +1,8 @@
-use gtfs_structures::Gtfs;
+use dashmap::DashMap;
 use gtfs_realtime::FeedMessage;
+use gtfs_structures::Gtfs;
 use serde::Serialize;
 use std::sync::Arc;
-use dashmap::DashMap;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize)]

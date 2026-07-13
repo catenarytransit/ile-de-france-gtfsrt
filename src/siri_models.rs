@@ -64,6 +64,10 @@ pub struct EstimatedCall {
     pub arrival_status: Option<String>,
     #[serde(rename = "DepartureStatus")]
     pub departure_status: Option<String>,
+    #[serde(rename = "ArrivalPlatformName")]
+    pub arrival_platform_name: Option<ValueWrapper>,
+    #[serde(rename = "DeparturePlatformName")]
+    pub departure_platform_name: Option<ValueWrapper>,
 }
 
 #[derive(Debug, Deserialize)]
