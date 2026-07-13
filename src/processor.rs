@@ -1,6 +1,6 @@
 use crate::matching::{MatchKind, MatchMissReason};
 use crate::matching_diagnostics::StopAlignmentDiagnostics;
-use crate::siri_models::{EstimatedVehicleJourney, SiriResponse};
+use crate::siri_models::{EstimatedCall, EstimatedVehicleJourney, SiriResponse};
 use crate::state::{AppState, PlatformInfo};
 use chrono::{DateTime, Utc};
 use gtfs_realtime::{
@@ -50,7 +50,10 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
 
     for delivery in siri.siri.service_delivery.estimated_timetable_delivery {
         for frame in delivery.estimated_journey_version_frame {
-            for journey in frame.estimated_vehicle_journey {
+            for mut journey in frame.estimated_vehicle_journey {
+                // IDFM does not consistently return EstimatedCall entries in journey order.
+                // Sort them by their absolute SIRI timestamps before stop-sequence matching.
+                sort_estimated_calls_by_time(&mut journey);
                 let matched = match match_index.match_journey(&journey, gtfs) {
                     Ok(matched) => matched,
                     Err(reason) => {
@@ -320,6 +323,49 @@ async fn append_missed_examples(path: &str, examples: &[serde_json::Value]) -> s
     Ok(())
 }
 
+fn sort_estimated_calls_by_time(journey: &mut EstimatedVehicleJourney) {
+    let Some(calls) = journey.estimated_calls.as_mut() else {
+        return;
+    };
+
+    // sort_by_cached_key is stable, so calls with equal timestamps, or calls with
+    // no usable timestamp, retain their original relative order.
+    calls
+        .estimated_call
+        .sort_by_cached_key(estimated_call_sort_key);
+}
+
+fn estimated_call_sort_key(call: &EstimatedCall) -> (bool, i64) {
+    // Aimed times describe the static journey order and are therefore preferred.
+    // Expected times are only a fallback for calls where IDFM omitted aimed times.
+    let aimed_timestamp = [
+        call.aimed_arrival_time.as_deref(),
+        call.aimed_departure_time.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(parse_siri_timestamp)
+    .min();
+
+    let expected_timestamp = [
+        call.expected_arrival_time.as_deref(),
+        call.expected_departure_time.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(parse_siri_timestamp)
+    .min();
+
+    let timestamp = aimed_timestamp.or(expected_timestamp);
+    (timestamp.is_none(), timestamp.unwrap_or(i64::MAX))
+}
+
+fn parse_siri_timestamp(value: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|date_time| date_time.timestamp())
+}
+
 fn siri_stop_ref_to_gtfs_stop_id(value: &str) -> Option<String> {
     let stop_id = value.rsplit(':').find(|part| !part.is_empty())?;
     Some(format!("IDFM:{stop_id}"))
@@ -331,7 +377,48 @@ fn is_cancelled_status(status: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_cancelled_status, siri_stop_ref_to_gtfs_stop_id};
+    use super::{
+        estimated_call_sort_key, is_cancelled_status, siri_stop_ref_to_gtfs_stop_id,
+    };
+    use crate::siri_models::{EstimatedCall, ValueWrapper};
+
+    fn estimated_call(stop_id: &str, aimed_departure: Option<&str>, expected_departure: Option<&str>) -> EstimatedCall {
+        EstimatedCall {
+            stop_point_ref: Some(ValueWrapper {
+                value: stop_id.to_string(),
+            }),
+            aimed_arrival_time: None,
+            aimed_departure_time: aimed_departure.map(|value| value.to_string()),
+            expected_arrival_time: None,
+            expected_departure_time: expected_departure.map(|value| value.to_string()),
+            arrival_status: None,
+            departure_status: None,
+            arrival_platform_name: None,
+            departure_platform_name: None,
+        }
+    }
+
+    #[test]
+    fn sorts_estimated_calls_chronologically_and_keeps_missing_times_last() {
+        let mut calls = vec![
+            estimated_call("late", Some("2026-07-12T10:00:00+02:00"), None),
+            estimated_call("missing", None, None),
+            estimated_call("early-expected", None, Some("2026-07-12T08:00:00+02:00")),
+            estimated_call("middle", Some("2026-07-12T09:00:00+02:00"), None),
+        ];
+
+        calls.sort_by_cached_key(estimated_call_sort_key);
+
+        let stop_ids = calls
+            .iter()
+            .map(|call| call.stop_point_ref.as_ref().unwrap().value.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            stop_ids,
+            vec!["early-expected", "middle", "late", "missing"]
+        );
+    }
 
     #[test]
     fn extracts_idfm_stop_id() {
