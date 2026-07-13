@@ -2,12 +2,37 @@ use crate::siri_models::EstimatedVehicleJourney;
 use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::{Europe::Paris, Tz};
 use gtfs_structures::{Exception, Gtfs, Trip};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchKind {
     ExactId,
     DirectionAndTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MatchMissReason {
+    NoObservedCalls,
+    NoUsableTimes,
+    MissingLineRef,
+    RouteNotFound,
+    NoStopAlignment,
+    InactiveServiceDate,
+    NoTimeComparisons,
+}
+
+impl MatchMissReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoObservedCalls => "no_observed_calls",
+            Self::NoUsableTimes => "no_usable_times",
+            Self::MissingLineRef => "missing_or_invalid_line_ref",
+            Self::RouteNotFound => "route_not_found",
+            Self::NoStopAlignment => "no_stop_alignment",
+            Self::InactiveServiceDate => "inactive_service_date",
+            Self::NoTimeComparisons => "no_time_comparisons",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -16,6 +41,10 @@ pub struct JourneyMatch {
     pub service_date: Option<NaiveDate>,
     pub kind: MatchKind,
     pub mean_abs_difference_seconds: Option<i64>,
+    /// GTFS stop_time indices corresponding to each SIRI call that had a StopPointRef.
+    pub stop_indices: Vec<usize>,
+    /// True when exact stop IDs did not align and station hierarchy was used.
+    pub used_parent_station_match: bool,
 }
 
 #[derive(Debug)]
@@ -33,6 +62,8 @@ pub struct GtfsMatchIndex {
     exact_trip_ids: HashMap<String, Vec<String>>,
     route_timezones: HashMap<String, Tz>,
     service_exceptions: HashMap<String, HashMap<NaiveDate, bool>>,
+    /// Stop/platform/boarding-area ID -> top-most known parent station ID.
+    canonical_stop_ids: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -61,6 +92,14 @@ struct CandidateScore {
     mean_abs_difference_seconds: i64,
     max_abs_difference_seconds: i64,
     comparisons: usize,
+    stop_indices: Vec<usize>,
+    used_parent_station_match: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopMatchMode {
+    Exact,
+    ParentStation,
 }
 
 impl CandidateScore {
@@ -116,6 +155,8 @@ impl GtfsMatchIndex {
                 (route_id.clone(), timezone)
             })
             .collect::<HashMap<_, _>>();
+
+        let canonical_stop_ids = build_canonical_stop_ids(gtfs);
 
         let mut grouped_directions =
             HashMap::<(String, Vec<String>), Vec<String>>::new();
@@ -189,6 +230,7 @@ impl GtfsMatchIndex {
             exact_trip_ids,
             route_timezones,
             service_exceptions,
+            canonical_stop_ids,
         }
     }
 
@@ -200,11 +242,11 @@ impl GtfsMatchIndex {
         &self,
         journey: &EstimatedVehicleJourney,
         gtfs: &Gtfs,
-    ) -> Option<JourneyMatch> {
+    ) -> Result<JourneyMatch, MatchMissReason> {
         let observed_calls = observed_calls(journey);
 
         if let Some(exact_match) = self.match_exact_id(journey, gtfs, &observed_calls) {
-            return Some(exact_match);
+            return Ok(exact_match);
         }
 
         self.match_direction_and_time(journey, gtfs, &observed_calls)
@@ -254,7 +296,9 @@ impl GtfsMatchIndex {
                     gtfs.trips
                         .get(*trip_id)
                         .and_then(|trip| trip.stop_times.last())
-                        .is_some_and(|stop_time| stop_time.stop.id == *destination_stop_id)
+                        .is_some_and(|stop_time| {
+                            self.stops_equivalent(&stop_time.stop.id, destination_stop_id)
+                        })
                 })
                 .collect::<Vec<_>>();
 
@@ -287,6 +331,8 @@ impl GtfsMatchIndex {
                 service_date: Some(score.service_date),
                 kind: MatchKind::ExactId,
                 mean_abs_difference_seconds: Some(score.mean_abs_difference_seconds),
+                stop_indices: score.stop_indices,
+                used_parent_station_match: score.used_parent_station_match,
             });
         }
 
@@ -295,11 +341,17 @@ impl GtfsMatchIndex {
         let timezone = self.timezone_for_route(&trip.route_id);
         let service_date = self.infer_service_date(trip, observed_calls, timezone, gtfs);
 
+        let (stop_indices, used_parent_station_match) = self
+            .first_alignment_for_trip(trip, observed_calls)
+            .unwrap_or_default();
+
         Some(JourneyMatch {
             trip_id,
             service_date,
             kind: MatchKind::ExactId,
             mean_abs_difference_seconds: None,
+            stop_indices,
+            used_parent_station_match,
         })
     }
 
@@ -308,83 +360,127 @@ impl GtfsMatchIndex {
         journey: &EstimatedVehicleJourney,
         gtfs: &Gtfs,
         observed_calls: &[ObservedCall],
-    ) -> Option<JourneyMatch> {
-        if observed_calls.is_empty() || !has_matching_time(observed_calls) {
-            return None;
+    ) -> Result<JourneyMatch, MatchMissReason> {
+        if observed_calls.is_empty() {
+            return Err(MatchMissReason::NoObservedCalls);
+        }
+        if !has_matching_time(observed_calls) {
+            return Err(MatchMissReason::NoUsableTimes);
         }
 
         let target_route_id = journey
             .line_ref
             .as_ref()
-            .and_then(|reference| extract_idfm_id(&reference.value))?;
-        let patterns = self.directions.get(&target_route_id)?;
+            .and_then(|reference| extract_idfm_id(&reference.value))
+            .ok_or(MatchMissReason::MissingLineRef)?;
+        let patterns = self
+            .directions
+            .get(&target_route_id)
+            .ok_or(MatchMissReason::RouteNotFound)?;
         let target_destination = journey
             .destination_ref
             .as_ref()
             .and_then(|reference| extract_idfm_id(&reference.value));
 
-        let destination_patterns = target_destination.as_ref().map(|destination| {
+        let exact_destination_patterns = target_destination.as_ref().map(|destination| {
             patterns
                 .iter()
                 .filter(|pattern| pattern.destination_stop_id == *destination)
                 .collect::<Vec<_>>()
         });
+        let parent_destination_patterns = target_destination.as_ref().map(|destination| {
+            patterns
+                .iter()
+                .filter(|pattern| {
+                    self.stops_equivalent(&pattern.destination_stop_id, destination)
+                })
+                .collect::<Vec<_>>()
+        });
 
-        let candidate_patterns = match destination_patterns {
-            Some(patterns_for_destination) if !patterns_for_destination.is_empty() => {
-                patterns_for_destination
-            }
-            _ => patterns.iter().collect::<Vec<_>>(),
+        let candidate_patterns = match exact_destination_patterns {
+            Some(exact) if !exact.is_empty() => exact,
+            _ => match parent_destination_patterns {
+                Some(parent) if !parent.is_empty() => parent,
+                _ => patterns.iter().collect::<Vec<_>>(),
+            },
         };
 
         let timezone = self.timezone_for_route(&target_route_id);
-        let service_dates = candidate_service_dates(observed_calls, timezone)?;
-        let mut best_score: Option<CandidateScore> = None;
+        let service_dates = candidate_service_dates(observed_calls, timezone)
+            .ok_or(MatchMissReason::NoUsableTimes)?;
+        let mut saw_alignment = false;
+        let mut saw_active_service = false;
 
-        for pattern in candidate_patterns {
-            let alignments = alignment_indices(&pattern.stop_ids, observed_calls);
-            if alignments.is_empty() {
-                continue;
-            }
+        // Preserve platform-level precision: only use parent-station equivalence
+        // after every exact-ID alignment attempt has failed to produce a match.
+        for mode in [StopMatchMode::Exact, StopMatchMode::ParentStation] {
+            let mut best_score: Option<CandidateScore> = None;
 
-            for trip_id in &pattern.trip_ids {
-                let Some(trip) = gtfs.trips.get(trip_id) else {
+            for pattern in &candidate_patterns {
+                let alignments = alignment_indices(
+                    &pattern.stop_ids,
+                    observed_calls,
+                    &self.canonical_stop_ids,
+                    mode,
+                );
+                if alignments.is_empty() {
                     continue;
-                };
+                }
+                saw_alignment = true;
 
-                for service_date in &service_dates {
-                    if !self.service_runs_on(gtfs, &trip.service_id, *service_date) {
+                for trip_id in &pattern.trip_ids {
+                    let Some(trip) = gtfs.trips.get(trip_id) else {
                         continue;
-                    }
+                    };
 
-                    for stop_indices in &alignments {
-                        let Some(score) = score_alignment(
-                            trip,
-                            observed_calls,
-                            stop_indices,
-                            *service_date,
-                            timezone,
-                        ) else {
+                    for service_date in &service_dates {
+                        if !self.service_runs_on(gtfs, &trip.service_id, *service_date) {
                             continue;
-                        };
+                        }
+                        saw_active_service = true;
 
-                        if best_score
-                            .as_ref()
-                            .is_none_or(|best| score.is_better_than(best))
-                        {
-                            best_score = Some(score);
+                        for stop_indices in &alignments {
+                            let Some(score) = score_alignment(
+                                trip,
+                                observed_calls,
+                                stop_indices,
+                                *service_date,
+                                timezone,
+                                mode == StopMatchMode::ParentStation,
+                            ) else {
+                                continue;
+                            };
+
+                            if best_score
+                                .as_ref()
+                                .is_none_or(|best| score.is_better_than(best))
+                            {
+                                best_score = Some(score);
+                            }
                         }
                     }
                 }
             }
+
+            if let Some(score) = best_score {
+                return Ok(JourneyMatch {
+                    trip_id: score.trip_id,
+                    service_date: Some(score.service_date),
+                    kind: MatchKind::DirectionAndTime,
+                    mean_abs_difference_seconds: Some(score.mean_abs_difference_seconds),
+                    stop_indices: score.stop_indices,
+                    used_parent_station_match: score.used_parent_station_match,
+                });
+            }
         }
 
-        best_score.map(|score| JourneyMatch {
-            trip_id: score.trip_id,
-            service_date: Some(score.service_date),
-            kind: MatchKind::DirectionAndTime,
-            mean_abs_difference_seconds: Some(score.mean_abs_difference_seconds),
-        })
+        if !saw_alignment {
+            Err(MatchMissReason::NoStopAlignment)
+        } else if !saw_active_service {
+            Err(MatchMissReason::InactiveServiceDate)
+        } else {
+            Err(MatchMissReason::NoTimeComparisons)
+        }
     }
 
     fn score_trip(
@@ -404,34 +500,83 @@ impl GtfsMatchIndex {
             .map(|stop_time| stop_time.stop.id.as_str())
             .collect::<Vec<_>>();
         let service_dates = candidate_service_dates(observed_calls, timezone)?;
-        let mut best_score: Option<CandidateScore> = None;
 
-        for stop_indices in alignment_indices(&trip_stop_ids, observed_calls) {
-            for service_date in &service_dates {
-                if !self.service_runs_on(gtfs, &trip.service_id, *service_date) {
-                    continue;
+        for mode in [StopMatchMode::Exact, StopMatchMode::ParentStation] {
+            let alignments = alignment_indices(
+                &trip_stop_ids,
+                observed_calls,
+                &self.canonical_stop_ids,
+                mode,
+            );
+            if alignments.is_empty() {
+                continue;
+            }
+
+            let mut best_score: Option<CandidateScore> = None;
+            for stop_indices in alignments {
+                for service_date in &service_dates {
+                    if !self.service_runs_on(gtfs, &trip.service_id, *service_date) {
+                        continue;
+                    }
+
+                    let Some(score) = score_alignment(
+                        trip,
+                        observed_calls,
+                        &stop_indices,
+                        *service_date,
+                        timezone,
+                        mode == StopMatchMode::ParentStation,
+                    ) else {
+                        continue;
+                    };
+
+                    if best_score
+                        .as_ref()
+                        .is_none_or(|best| score.is_better_than(best))
+                    {
+                        best_score = Some(score);
+                    }
                 }
+            }
 
-                let Some(score) = score_alignment(
-                    trip,
-                    observed_calls,
-                    &stop_indices,
-                    *service_date,
-                    timezone,
-                ) else {
-                    continue;
-                };
-
-                if best_score
-                    .as_ref()
-                    .is_none_or(|best| score.is_better_than(best))
-                {
-                    best_score = Some(score);
-                }
+            if best_score.is_some() {
+                return best_score;
             }
         }
 
-        best_score
+        None
+    }
+
+    fn first_alignment_for_trip(
+        &self,
+        trip: &Trip,
+        observed_calls: &[ObservedCall],
+    ) -> Option<(Vec<usize>, bool)> {
+        if observed_calls.is_empty() {
+            return None;
+        }
+
+        let stop_ids = trip
+            .stop_times
+            .iter()
+            .map(|stop_time| stop_time.stop.id.as_str())
+            .collect::<Vec<_>>();
+
+        for mode in [StopMatchMode::Exact, StopMatchMode::ParentStation] {
+            if let Some(indices) = alignment_indices(
+                &stop_ids,
+                observed_calls,
+                &self.canonical_stop_ids,
+                mode,
+            )
+            .into_iter()
+            .next()
+            {
+                return Some((indices, mode == StopMatchMode::ParentStation));
+            }
+        }
+
+        None
     }
 
     fn infer_service_date(
@@ -470,9 +615,48 @@ impl GtfsMatchIndex {
         })
     }
 
+    fn stops_equivalent(&self, left: &str, right: &str) -> bool {
+        left == right || self.canonical_stop_id(left) == self.canonical_stop_id(right)
+    }
+
+    fn canonical_stop_id<'a>(&'a self, stop_id: &'a str) -> &'a str {
+        self.canonical_stop_ids
+            .get(stop_id)
+            .map(String::as_str)
+            .unwrap_or(stop_id)
+    }
+
     fn timezone_for_route(&self, route_id: &str) -> Tz {
         self.route_timezones.get(route_id).copied().unwrap_or(Paris)
     }
+}
+
+fn build_canonical_stop_ids(gtfs: &Gtfs) -> HashMap<String, String> {
+    let mut canonical = HashMap::with_capacity(gtfs.stops.len());
+
+    for stop_id in gtfs.stops.keys() {
+        let mut current = stop_id.clone();
+        let mut visited = HashSet::new();
+
+        while visited.insert(current.clone()) {
+            let Some(parent) = gtfs
+                .stops
+                .get(&current)
+                .and_then(|stop| stop.parent_station.as_ref())
+            else {
+                break;
+            };
+
+            if parent == &current {
+                break;
+            }
+            current = parent.clone();
+        }
+
+        canonical.insert(stop_id.clone(), current);
+    }
+
+    canonical
 }
 
 fn insert_exact_key(index: &mut HashMap<String, Vec<String>>, key: &str, trip_id: &str) {
@@ -565,12 +749,16 @@ fn candidate_service_dates(
 fn alignment_indices<S: AsRef<str>>(
     stop_ids: &[S],
     observed_calls: &[ObservedCall],
+    canonical_stop_ids: &HashMap<String, String>,
+    mode: StopMatchMode,
 ) -> Vec<Vec<usize>> {
     let mut alignments = Vec::new();
     let mut current = Vec::with_capacity(observed_calls.len());
     collect_alignment_indices(
         stop_ids,
         observed_calls,
+        canonical_stop_ids,
+        mode,
         0,
         0,
         &mut current,
@@ -579,9 +767,12 @@ fn alignment_indices<S: AsRef<str>>(
     alignments
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_alignment_indices<S: AsRef<str>>(
     stop_ids: &[S],
     observed_calls: &[ObservedCall],
+    canonical_stop_ids: &HashMap<String, String>,
+    mode: StopMatchMode,
     call_index: usize,
     search_from: usize,
     current: &mut Vec<usize>,
@@ -599,7 +790,22 @@ fn collect_alignment_indices<S: AsRef<str>>(
 
     let last_candidate = stop_ids.len() - remaining_calls;
     for stop_index in search_from..=last_candidate {
-        if stop_ids[stop_index].as_ref() != observed_calls[call_index].stop_id.as_str() {
+        let gtfs_stop_id = stop_ids[stop_index].as_ref();
+        let siri_stop_id = observed_calls[call_index].stop_id.as_str();
+        let matches = match mode {
+            StopMatchMode::Exact => gtfs_stop_id == siri_stop_id,
+            StopMatchMode::ParentStation => {
+                canonical_stop_ids
+                    .get(gtfs_stop_id)
+                    .map(String::as_str)
+                    .unwrap_or(gtfs_stop_id)
+                    == canonical_stop_ids
+                        .get(siri_stop_id)
+                        .map(String::as_str)
+                        .unwrap_or(siri_stop_id)
+            }
+        };
+        if !matches {
             continue;
         }
 
@@ -607,6 +813,8 @@ fn collect_alignment_indices<S: AsRef<str>>(
         collect_alignment_indices(
             stop_ids,
             observed_calls,
+            canonical_stop_ids,
+            mode,
             call_index + 1,
             stop_index + 1,
             current,
@@ -622,6 +830,7 @@ fn score_alignment(
     stop_indices: &[usize],
     service_date: NaiveDate,
     timezone: Tz,
+    used_parent_station_match: bool,
 ) -> Option<CandidateScore> {
     if stop_indices.len() != observed_calls.len() {
         return None;
@@ -677,6 +886,8 @@ fn score_alignment(
         mean_abs_difference_seconds: (total_difference / comparisons as i128) as i64,
         max_abs_difference_seconds: max_difference,
         comparisons,
+        stop_indices: stop_indices.to_vec(),
+        used_parent_station_match,
     })
 }
 
@@ -722,6 +933,18 @@ fn scheduled_timestamps(
 mod tests {
     use super::*;
 
+    fn exact_alignments<S: AsRef<str>>(
+        stop_ids: &[S],
+        observed_calls: &[ObservedCall],
+    ) -> Vec<Vec<usize>> {
+        alignment_indices(
+            stop_ids,
+            observed_calls,
+            &HashMap::new(),
+            StopMatchMode::Exact,
+        )
+    }
+
     fn observed_call(stop_id: &str) -> ObservedCall {
         ObservedCall {
             stop_id: stop_id.to_string(),
@@ -742,7 +965,7 @@ mod tests {
         ];
 
         assert_eq!(
-            alignment_indices(&stop_ids, &observed_calls),
+            exact_alignments(&stop_ids, &observed_calls),
             vec![vec![1, 3, 5]]
         );
     }
@@ -753,7 +976,7 @@ mod tests {
         let observed_calls = [observed_call("B"), observed_call("D")];
 
         assert_eq!(
-            alignment_indices(&stop_ids, &observed_calls),
+            exact_alignments(&stop_ids, &observed_calls),
             vec![vec![1, 4], vec![3, 4]]
         );
     }
@@ -763,7 +986,37 @@ mod tests {
         let stop_ids = ["A", "B", "C", "D"];
         let observed_calls = [observed_call("D"), observed_call("B")];
 
-        assert!(alignment_indices(&stop_ids, &observed_calls).is_empty());
+        assert!(exact_alignments(&stop_ids, &observed_calls).is_empty());
+    }
+
+    #[test]
+    fn parent_station_alignment_matches_sibling_platforms() {
+        let stop_ids = ["platform-a", "platform-c"];
+        let observed_calls = [observed_call("platform-b"), observed_call("platform-c")];
+        let canonical = HashMap::from([
+            ("platform-a".to_string(), "station".to_string()),
+            ("platform-b".to_string(), "station".to_string()),
+            ("platform-c".to_string(), "platform-c".to_string()),
+        ]);
+
+        assert!(
+            alignment_indices(
+                &stop_ids,
+                &observed_calls,
+                &canonical,
+                StopMatchMode::Exact,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            alignment_indices(
+                &stop_ids,
+                &observed_calls,
+                &canonical,
+                StopMatchMode::ParentStation,
+            ),
+            vec![vec![0, 1]]
+        );
     }
 
     #[test]
