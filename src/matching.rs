@@ -161,8 +161,7 @@ impl GtfsMatchIndex {
 
         let canonical_stop_ids = build_canonical_stop_ids(gtfs);
 
-        let mut grouped_directions =
-            HashMap::<(String, Vec<String>), Vec<String>>::new();
+        let mut grouped_directions = HashMap::<(String, Vec<String>), Vec<String>>::new();
         let mut exact_trip_ids = HashMap::<String, Vec<String>>::new();
 
         for (trip_id, trip) in &gtfs.trips {
@@ -467,9 +466,7 @@ impl GtfsMatchIndex {
         let parent_destination_patterns = target_destination.as_ref().map(|destination| {
             patterns
                 .iter()
-                .filter(|pattern| {
-                    self.stops_equivalent(&pattern.destination_stop_id, destination)
-                })
+                .filter(|pattern| self.stops_equivalent(&pattern.destination_stop_id, destination))
                 .collect::<Vec<_>>()
         });
 
@@ -639,14 +636,10 @@ impl GtfsMatchIndex {
             .collect::<Vec<_>>();
 
         for mode in [StopMatchMode::Exact, StopMatchMode::ParentStation] {
-            if let Some(indices) = alignment_indices(
-                &stop_ids,
-                observed_calls,
-                &self.canonical_stop_ids,
-                mode,
-            )
-            .into_iter()
-            .next()
+            if let Some(indices) =
+                alignment_indices(&stop_ids, observed_calls, &self.canonical_stop_ids, mode)
+                    .into_iter()
+                    .next()
             {
                 return Some((indices, mode == StopMatchMode::ParentStation));
             }
@@ -767,10 +760,7 @@ fn observed_calls(journey: &EstimatedVehicleJourney) -> Vec<ObservedCall> {
 
             Some(ObservedCall {
                 stop_id,
-                aimed_arrival: call
-                    .aimed_arrival_time
-                    .as_deref()
-                    .and_then(parse_timestamp),
+                aimed_arrival: call.aimed_arrival_time.as_deref().and_then(parse_timestamp),
                 aimed_departure: call
                     .aimed_departure_time
                     .as_deref()
@@ -795,9 +785,9 @@ fn parse_timestamp(value: &str) -> Option<i64> {
 }
 
 fn has_matching_time(observed_calls: &[ObservedCall]) -> bool {
-    observed_calls.iter().any(|call| {
-        call.matching_arrival().is_some() || call.matching_departure().is_some()
-    })
+    observed_calls
+        .iter()
+        .any(|call| call.matching_arrival().is_some() || call.matching_departure().is_some())
 }
 
 fn candidate_service_dates(
@@ -923,12 +913,9 @@ fn score_alignment(
             observed_call.matching_arrival(),
             stop_time.arrival_time.or(stop_time.departure_time),
         ) {
-            if let Some(difference) = minimum_time_difference(
-                observed,
-                service_date,
-                scheduled_seconds,
-                timezone,
-            ) {
+            if let Some(difference) =
+                minimum_time_difference(observed, service_date, scheduled_seconds, timezone)
+            {
                 total_difference += i128::from(difference);
                 max_difference = max_difference.max(difference);
                 comparisons += 1;
@@ -939,12 +926,9 @@ fn score_alignment(
             observed_call.matching_departure(),
             stop_time.departure_time.or(stop_time.arrival_time),
         ) {
-            if let Some(difference) = minimum_time_difference(
-                observed,
-                service_date,
-                scheduled_seconds,
-                timezone,
-            ) {
+            if let Some(difference) =
+                minimum_time_difference(observed, service_date, scheduled_seconds, timezone)
+            {
                 total_difference += i128::from(difference);
                 max_difference = max_difference.max(difference);
                 comparisons += 1;
@@ -975,17 +959,11 @@ fn minimum_time_difference(
 ) -> Option<i64> {
     scheduled_timestamps(service_date, scheduled_seconds, timezone)
         .into_iter()
-        .map(|scheduled_timestamp| {
-            expected_timestamp.abs_diff(scheduled_timestamp) as i64
-        })
+        .map(|scheduled_timestamp| expected_timestamp.abs_diff(scheduled_timestamp) as i64)
         .min()
 }
 
-fn scheduled_timestamps(
-    service_date: NaiveDate,
-    scheduled_seconds: u32,
-    timezone: Tz,
-) -> Vec<i64> {
+fn scheduled_timestamps(service_date: NaiveDate, scheduled_seconds: u32, timezone: Tz) -> Vec<i64> {
     let day_offset = i64::from(scheduled_seconds / 86_400);
     let seconds_in_day = scheduled_seconds % 86_400;
     let Some(date) = service_date.checked_add_signed(Duration::days(day_offset)) else {
@@ -1034,11 +1012,7 @@ mod tests {
     #[test]
     fn aligns_omitted_calls_as_an_ordered_subsequence() {
         let stop_ids = ["A", "B", "C", "D", "E", "F"];
-        let observed_calls = [
-            observed_call("B"),
-            observed_call("D"),
-            observed_call("F"),
-        ];
+        let observed_calls = [observed_call("B"), observed_call("D"), observed_call("F")];
 
         assert_eq!(
             exact_alignments(&stop_ids, &observed_calls),
@@ -1076,13 +1050,8 @@ mod tests {
         ]);
 
         assert!(
-            alignment_indices(
-                &stop_ids,
-                &observed_calls,
-                &canonical,
-                StopMatchMode::Exact,
-            )
-            .is_empty()
+            alignment_indices(&stop_ids, &observed_calls, &canonical, StopMatchMode::Exact,)
+                .is_empty()
         );
         assert_eq!(
             alignment_indices(

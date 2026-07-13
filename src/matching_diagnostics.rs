@@ -90,16 +90,10 @@ pub fn diagnose_stop_alignment(
         StopMatchMode::ParentStation,
     );
 
-    let candidate_has_full_alignment = has_full_alignment(
-        candidate_patterns,
-        observed_stop_ids,
-        canonical_stop_ids,
-    );
-    let all_patterns_have_full_alignment = has_full_alignment(
-        all_patterns,
-        observed_stop_ids,
-        canonical_stop_ids,
-    );
+    let candidate_has_full_alignment =
+        has_full_alignment(candidate_patterns, observed_stop_ids, canonical_stop_ids);
+    let all_patterns_have_full_alignment =
+        has_full_alignment(all_patterns, observed_stop_ids, canonical_stop_ids);
     let match_exists_without_destination_filter = destination_filter_applied
         && !candidate_has_full_alignment
         && all_patterns_have_full_alignment;
@@ -117,19 +111,11 @@ pub fn diagnose_stop_alignment(
         .count();
     let collapsed_calls = collapse_consecutive_calls(observed_stop_ids, canonical_stop_ids);
     let collapsed_duplicate_alignment_exists = consecutive_duplicate_count > 0
-        && has_full_alignment(
-            candidate_patterns,
-            &collapsed_calls,
-            canonical_stop_ids,
-        );
+        && has_full_alignment(candidate_patterns, &collapsed_calls, canonical_stop_ids);
 
     let all_stops_known_in_one_pattern = unknown_stop_ids.is_empty()
         && candidate_patterns.iter().any(|pattern| {
-            contains_all_calls_ignoring_order(
-                pattern,
-                observed_stop_ids,
-                canonical_stop_ids,
-            )
+            contains_all_calls_ignoring_order(pattern, observed_stop_ids, canonical_stop_ids)
         });
 
     let observed_call_count = observed_stop_ids.len();
@@ -148,8 +134,7 @@ pub fn diagnose_stop_alignment(
     } else if all_stops_known_in_one_pattern {
         StopAlignmentFailureKind::AllStopsKnownButWrongOrder
     } else if best_parent.matched_calls > 0
-        && best_parent.matched_calls.saturating_mul(10)
-            >= observed_call_count.saturating_mul(9)
+        && best_parent.matched_calls.saturating_mul(10) >= observed_call_count.saturating_mul(9)
     {
         StopAlignmentFailureKind::PartialAlignment90Percent
     } else if best_parent.matched_calls > 0 {
@@ -192,14 +177,11 @@ fn best_partial_alignment(
         );
         let matched_calls = alignment.iter().filter(|index| index.is_some()).count();
         let length_difference = pattern.len().abs_diff(observed_stop_ids.len());
-        let best_length_difference = best
-            .pattern_call_count
-            .abs_diff(observed_stop_ids.len());
+        let best_length_difference = best.pattern_call_count.abs_diff(observed_stop_ids.len());
 
         if !found_pattern
             || matched_calls > best.matched_calls
-            || (matched_calls == best.matched_calls
-                && length_difference < best_length_difference)
+            || (matched_calls == best.matched_calls && length_difference < best_length_difference)
         {
             found_pattern = true;
             best = PartialAlignmentSummary {
@@ -254,10 +236,7 @@ fn longest_common_subsequence_alignment(
             mode,
         );
 
-        if is_match
-            && current
-                == lengths[(observed_index - 1) * width + pattern_index - 1] + 1
-        {
+        if is_match && current == lengths[(observed_index - 1) * width + pattern_index - 1] + 1 {
             alignment[observed_index - 1] = Some(pattern_index - 1);
             observed_index -= 1;
             pattern_index -= 1;
@@ -384,10 +363,7 @@ fn stops_match(
     }
 }
 
-fn canonical_stop_id_owned(
-    stop_id: &str,
-    canonical_stop_ids: &HashMap<String, String>,
-) -> String {
+fn canonical_stop_id_owned(stop_id: &str, canonical_stop_ids: &HashMap<String, String>) -> String {
     canonical_stop_ids
         .get(stop_id)
         .cloned()
@@ -421,7 +397,10 @@ mod tests {
             false,
         );
 
-        assert_eq!(diagnostics.kind, StopAlignmentFailureKind::UnknownSiriStopIds);
+        assert_eq!(
+            diagnostics.kind,
+            StopAlignmentFailureKind::UnknownSiriStopIds
+        );
         assert_eq!(diagnostics.unknown_stop_ids, vec!["unknown"]);
         assert_eq!(diagnostics.best_parent_matched_calls, 2);
     }

@@ -70,9 +70,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                         unmatched += 1;
                         *missed_by_reason.entry(reason_name).or_default() += 1;
 
-                        let sampled = missed_examples_by_reason
-                            .entry(reason_name)
-                            .or_default();
+                        let sampled = missed_examples_by_reason.entry(reason_name).or_default();
                         if *sampled < MAX_MISSED_EXAMPLES_PER_REASON {
                             missed_examples.push(build_missed_example(
                                 &journey,
@@ -122,9 +120,13 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                             .arrival_status
                             .as_deref()
                             .is_some_and(is_cancelled_status)
-                            || call.departure_status.as_deref().is_some_and(is_cancelled_status)
+                            || call
+                                .departure_status
+                                .as_deref()
+                                .is_some_and(is_cancelled_status)
                         {
-                            stu.schedule_relationship = Some(StopTimeScheduleRelationship::Skipped as i32);
+                            stu.schedule_relationship =
+                                Some(StopTimeScheduleRelationship::Skipped as i32);
                         }
 
                         let siri_stop_id = call
@@ -210,9 +212,8 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
         eprintln!("Failed to write unmatched SIRI examples: {error}");
     }
 
-    let average_difference_seconds = (scored_matches > 0).then(|| {
-        total_mean_difference_seconds / i128::from(scored_matches)
-    });
+    let average_difference_seconds =
+        (scored_matches > 0).then(|| total_mean_difference_seconds / i128::from(scored_matches));
 
     println!(
         "Matched: Exact = {}, Direction/time = {}, Parent-assisted = {}, Missed = {}, Average aimed-time difference = {:?}s",
@@ -377,12 +378,14 @@ fn is_cancelled_status(status: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        estimated_call_sort_key, is_cancelled_status, siri_stop_ref_to_gtfs_stop_id,
-    };
+    use super::{estimated_call_sort_key, is_cancelled_status, siri_stop_ref_to_gtfs_stop_id};
     use crate::siri_models::{EstimatedCall, ValueWrapper};
 
-    fn estimated_call(stop_id: &str, aimed_departure: Option<&str>, expected_departure: Option<&str>) -> EstimatedCall {
+    fn estimated_call(
+        stop_id: &str,
+        aimed_departure: Option<&str>,
+        expected_departure: Option<&str>,
+    ) -> EstimatedCall {
         EstimatedCall {
             stop_point_ref: Some(ValueWrapper {
                 value: stop_id.to_string(),
