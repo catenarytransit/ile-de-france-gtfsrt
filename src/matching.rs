@@ -818,8 +818,18 @@ fn alignment_indices<S: AsRef<str>>(
     canonical_stop_ids: &HashMap<String, String>,
     mode: StopMatchMode,
 ) -> Vec<Vec<usize>> {
+    // Repeated stops and parent-station matching can produce C(n, k)
+    // subsequence alignments. The old implementation materialized every one,
+    // which could keep process_siri busy for minutes or effectively forever.
+    //
+    // Keep a bounded sample for time scoring, and memoize states that cannot
+    // reach a complete alignment. This bounds successful searches and makes
+    // unsuccessful searches O(stop_count * observed_call_count).
+    const MAX_ALIGNMENTS_PER_PATTERN: usize = 64;
+
     let mut alignments = Vec::new();
     let mut current = Vec::with_capacity(observed_calls.len());
+    let mut dead_states = HashSet::new();
     collect_alignment_indices(
         stop_ids,
         observed_calls,
@@ -829,6 +839,8 @@ fn alignment_indices<S: AsRef<str>>(
         0,
         &mut current,
         &mut alignments,
+        &mut dead_states,
+        MAX_ALIGNMENTS_PER_PATTERN,
     );
     alignments
 }
@@ -843,18 +855,32 @@ fn collect_alignment_indices<S: AsRef<str>>(
     search_from: usize,
     current: &mut Vec<usize>,
     alignments: &mut Vec<Vec<usize>>,
-) {
+    dead_states: &mut HashSet<(usize, usize)>,
+    max_alignments: usize,
+) -> bool {
+    if alignments.len() >= max_alignments {
+        return true;
+    }
+
     if call_index == observed_calls.len() {
         alignments.push(current.clone());
-        return;
+        return true;
+    }
+
+    let state = (call_index, search_from);
+    if dead_states.contains(&state) {
+        return false;
     }
 
     let remaining_calls = observed_calls.len() - call_index;
     if stop_ids.len().saturating_sub(search_from) < remaining_calls {
-        return;
+        dead_states.insert(state);
+        return false;
     }
 
     let last_candidate = stop_ids.len() - remaining_calls;
+    let mut found_completion = false;
+
     for stop_index in search_from..=last_candidate {
         let gtfs_stop_id = stop_ids[stop_index].as_ref();
         let siri_stop_id = observed_calls[call_index].stop_id.as_str();
@@ -876,7 +902,7 @@ fn collect_alignment_indices<S: AsRef<str>>(
         }
 
         current.push(stop_index);
-        collect_alignment_indices(
+        found_completion |= collect_alignment_indices(
             stop_ids,
             observed_calls,
             canonical_stop_ids,
@@ -885,9 +911,21 @@ fn collect_alignment_indices<S: AsRef<str>>(
             stop_index + 1,
             current,
             alignments,
+            dead_states,
+            max_alignments,
         );
         current.pop();
+
+        if alignments.len() >= max_alignments {
+            break;
+        }
     }
+
+    if !found_completion {
+        dead_states.insert(state);
+    }
+
+    found_completion
 }
 
 fn score_alignment(
