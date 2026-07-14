@@ -467,10 +467,6 @@ mod tests {
             id: "IDFM:monomodalStopPlace:12345".to_string(),
             ..Default::default()
         }));
-        stops.insert("IDFM:monomodalStopPlace:47874".to_string(), Arc::new(Stop {
-            id: "IDFM:monomodalStopPlace:47874".to_string(),
-            ..Default::default()
-        }));
 
         let gtfs = Gtfs {
             trips,
@@ -500,6 +496,19 @@ mod tests {
             journey_note: None,
             estimated_calls: Some(EstimatedCalls {
                 estimated_call: vec![
+                    EstimatedCall {
+                        stop_point_ref: Some(ValueWrapper {
+                            value: Some("STIF:StopPoint:Q:12345:".to_string()),
+                        }),
+                        aimed_arrival_time: None,
+                        aimed_departure_time: Some("2026-07-12T10:00:00+02:00".to_string()),
+                        expected_arrival_time: None,
+                        expected_departure_time: Some("2026-07-12T10:00:00+02:00".to_string()),
+                        arrival_status: None,
+                        departure_status: None,
+                        arrival_platform_name: None,
+                        departure_platform_name: None,
+                    },
                     EstimatedCall {
                         stop_point_ref: Some(ValueWrapper {
                             value: Some("STIF:StopPoint:Q:47874:".to_string()),
@@ -533,6 +542,8 @@ mod tests {
         
         assert_eq!(feed.entity.len(), 1);
         let update = feed.entity[0].trip_update.as_ref().unwrap();
-        assert!(update.stop_time_update.is_empty());
+        // Emits exactly one update for the mapped static stop ID 12345, skipping the unmapped one.
+        assert_eq!(update.stop_time_update.len(), 1);
+        assert_eq!(update.stop_time_update[0].stop_id, Some("IDFM:monomodalStopPlace:12345".to_string()));
     }
 }
