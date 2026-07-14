@@ -802,6 +802,8 @@ fn candidate_service_dates(
             .filter_map(|days| local_date.checked_sub_signed(Duration::days(days)))
             .collect(),
     )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DpScore {
     total_difference: i128,
