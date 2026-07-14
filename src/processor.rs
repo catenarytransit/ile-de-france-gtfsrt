@@ -14,7 +14,7 @@ use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncWriteExt;
 
-pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
+pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) -> FeedMessage {
     const MAX_MISSED_EXAMPLES_PER_REASON: usize = 20;
 
     let mut missed_examples = Vec::new();
@@ -42,7 +42,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
     };
 
     let Some(loaded_gtfs) = loaded_gtfs else {
-        return;
+        return FeedMessage::default();
     };
 
     let gtfs = &loaded_gtfs.gtfs;
@@ -242,8 +242,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
         );
     }
 
-    let mut lock = state.gtfs_rt_feed.write().await;
-    *lock = feed_msg;
+    feed_msg
 }
 
 fn build_missed_example(

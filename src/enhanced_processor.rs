@@ -11,7 +11,7 @@ use crate::siri_models::{EstimatedCall, EstimatedVehicleJourney, SiriResponse};
 use crate::state::{AppState, PlatformInfo, VehicleAssignment};
 use chrono::{DateTime, Utc};
 use gtfs_realtime::{
-    FeedEntity, TripDescriptor, TripUpdate,
+    FeedEntity, FeedMessage, TripDescriptor, TripUpdate,
     trip_descriptor::ScheduleRelationship as TripScheduleRelationship,
     trip_update::{
         StopTimeEvent, StopTimeUpdate,
@@ -32,7 +32,8 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
     };
 
     let Some(loaded_gtfs) = loaded_gtfs else {
-        processor::process_siri(state, siri).await;
+        let feed_msg = processor::process_siri(state.clone(), siri).await;
+        publish_and_cache_feed(state, feed_msg).await;
         return;
     };
 
@@ -110,10 +111,9 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
     }
 
     // Build all exact/strict updates with the existing implementation first.
-    processor::process_siri(state.clone(), siri).await;
+    let mut feed = processor::process_siri(state.clone(), siri).await;
 
     // Then append only trips that were not already emitted by the strict processor.
-    let mut feed = state.gtfs_rt_feed.write().await;
     let mut existing_trip_ids = feed
         .entity
         .iter()
@@ -153,7 +153,6 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
         existing_entity_ids.insert(entity.id.clone());
         feed.entity.push(entity);
     }
-    drop(feed);
 
     state.vehicle_assignments.retain(|_, assignment| {
         now.saturating_sub(assignment.last_seen_epoch) <= VEHICLE_ASSIGNMENT_RETENTION_SECONDS
@@ -162,6 +161,8 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
     println!(
         "Recovered matches: adaptive = {adaptive_matches}, cache = {cached_matches}, extra journeys = {extra_journeys}"
     );
+
+    publish_and_cache_feed(state.clone(), feed).await;
 }
 
 fn remember_assignment(
@@ -429,4 +430,35 @@ fn sanitize_entity_id(value: &str) -> String {
 
 fn is_cancelled_status(status: &str) -> bool {
     status.eq_ignore_ascii_case("CANCELLED") || status.eq_ignore_ascii_case("CANCELED")
+}
+
+async fn publish_and_cache_feed(state: Arc<AppState>, feed_msg: FeedMessage) {
+    let feed_arc = Arc::new(feed_msg);
+    {
+        let mut lock = state.gtfs_rt_feed.write().await;
+        *lock = feed_arc.clone();
+    }
+
+    let cache_path = std::env::var("GTFS_RT_CACHE_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("./gtfs-rt.pb"));
+
+    tokio::spawn(async move {
+        use prost::Message;
+        let mut buf = Vec::new();
+        if let Err(e) = feed_arc.encode(&mut buf) {
+            eprintln!("Failed to encode GTFS-RT feed for caching: {e}");
+            return;
+        }
+
+        let temp_path = cache_path.with_extension("pb.tmp");
+        if let Err(e) = tokio::fs::write(&temp_path, buf).await {
+            eprintln!("Failed to write temporary GTFS-RT cache file {}: {e}", temp_path.display());
+            return;
+        }
+
+        if let Err(e) = tokio::fs::rename(&temp_path, &cache_path).await {
+            eprintln!("Failed to rename temporary GTFS-RT cache to {}: {e}", cache_path.display());
+        }
+    });
 }

@@ -10,6 +10,7 @@ mod siri_models;
 mod state;
 
 use anyhow::Result;
+use gtfs_realtime::FeedMessage;
 use keys::KeyManager;
 use prost::Message;
 use state::AppState;
@@ -26,7 +27,40 @@ async fn main() -> Result<()> {
     println!("Initializing Ile-de-France GTFS-RT Server...");
 
     let key_manager = Arc::new(KeyManager::new(KEYS_FILE)?);
-    let state = Arc::new(AppState::new());
+    let state = {
+        let rt_cache_path = std::env::var("GTFS_RT_CACHE_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("./gtfs-rt.pb"));
+
+        let initial_feed = match tokio::fs::read(&rt_cache_path).await {
+            Ok(bytes) => {
+                match FeedMessage::decode(&bytes[..]) {
+                    Ok(feed) => {
+                        println!(
+                            "Recovered cached GTFS-RT feed from {}: {} entities",
+                            rt_cache_path.display(),
+                            feed.entity.len()
+                        );
+                        feed
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to decode cached GTFS-RT feed: {e}");
+                        FeedMessage::default()
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!("No cached GTFS-RT feed found at {}", rt_cache_path.display());
+                FeedMessage::default()
+            }
+            Err(e) => {
+                eprintln!("Failed to read cached GTFS-RT feed: {e}");
+                FeedMessage::default()
+            }
+        };
+
+        Arc::new(AppState::new(initial_feed))
+    };
 
     // Start background GTFS update loop
     gtfs_manager::start_gtfs_updater(state.clone(), GTFS_URL.to_string()).await?;
@@ -44,7 +78,7 @@ async fn main() -> Result<()> {
         .then(|state: Arc<AppState>| async move {
             let msg = {
                 let lock = state.gtfs_rt_feed.read().await;
-                lock.clone()
+                Arc::clone(&*lock)
             };
             let mut buf = Vec::new();
             msg.encode(&mut buf).unwrap();

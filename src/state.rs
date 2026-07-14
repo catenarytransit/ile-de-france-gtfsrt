@@ -42,16 +42,16 @@ impl LoadedGtfs {
 
 pub struct AppState {
     pub gtfs: RwLock<Option<Arc<LoadedGtfs>>>,
-    pub gtfs_rt_feed: RwLock<FeedMessage>,
+    pub gtfs_rt_feed: RwLock<Arc<FeedMessage>>,
     pub trip_platforms: DashMap<String, Vec<PlatformInfo>>,
     pub vehicle_assignments: DashMap<String, VehicleAssignment>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(initial_feed: FeedMessage) -> Self {
         Self {
             gtfs: RwLock::new(None),
-            gtfs_rt_feed: RwLock::new(FeedMessage::default()),
+            gtfs_rt_feed: RwLock::new(Arc::new(initial_feed)),
             trip_platforms: DashMap::new(),
             vehicle_assignments: DashMap::new(),
         }
