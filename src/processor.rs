@@ -428,4 +428,111 @@ mod tests {
         assert!(is_cancelled_status("CANCELED"));
         assert!(!is_cancelled_status("ON_TIME"));
     }
+
+    #[tokio::test]
+    fn rail_trip_updates_only_use_static_trip_stop_ids() {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        use dashmap::DashMap;
+        use gtfs_structures::{StopTime, Stop, Trip, Gtfs};
+        use crate::state::AppState;
+        use crate::state::LoadedGtfs;
+        use crate::siri_models::{
+            SiriResponse, Siri, ServiceDelivery, EstimatedTimetableDelivery,
+            EstimatedJourneyVersionFrame, EstimatedVehicleJourney, EstimatedCalls,
+            EstimatedCall, ValueWrapper,
+        };
+
+        let stop = Arc::new(Stop {
+            id: "IDFM:monomodalStopPlace:12345".to_string(),
+            ..Default::default()
+        });
+
+        let mut trips = BTreeMap::new();
+        trips.insert("trip-1".to_string(), Trip {
+            id: "trip-1".to_string(),
+            service_id: "service-1".to_string(),
+            route_id: "IDFM:route-1".to_string(),
+            stop_times: vec![StopTime {
+                stop: stop.clone(),
+                arrival_time: None,
+                departure_time: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let mut stops = BTreeMap::new();
+        stops.insert("IDFM:monomodalStopPlace:12345".to_string(), Stop {
+            id: "IDFM:monomodalStopPlace:12345".to_string(),
+            ..Default::default()
+        });
+        stops.insert("IDFM:monomodalStopPlace:47874".to_string(), Stop {
+            id: "IDFM:monomodalStopPlace:47874".to_string(),
+            ..Default::default()
+        });
+
+        let gtfs = Gtfs {
+            trips,
+            stops,
+            ..Default::default()
+        };
+
+        let loaded = Arc::new(LoadedGtfs::new(gtfs));
+        let state = Arc::new(AppState {
+            gtfs: tokio::sync::RwLock::new(Some(loaded)),
+            gtfs_rt_feed: tokio::sync::RwLock::new(Arc::new(Default::default())),
+            trip_platforms: DashMap::new(),
+            vehicle_assignments: DashMap::new(),
+        });
+
+        let journey = EstimatedVehicleJourney {
+            dated_vehicle_journey_ref: Some(ValueWrapper {
+                value: Some("SIRI::trip-1".to_string()),
+            }),
+            line_ref: Some(ValueWrapper {
+                value: Some("STIF:Line::route-1:".to_string()),
+            }),
+            operator_ref: None,
+            direction_ref: None,
+            direction_name: None,
+            destination_ref: None,
+            journey_note: None,
+            estimated_calls: Some(EstimatedCalls {
+                estimated_call: vec![
+                    EstimatedCall {
+                        stop_point_ref: Some(ValueWrapper {
+                            value: Some("STIF:StopPoint:Q:47874:".to_string()),
+                        }),
+                        aimed_arrival_time: None,
+                        aimed_departure_time: None,
+                        expected_arrival_time: None,
+                        expected_departure_time: None,
+                        arrival_status: None,
+                        departure_status: None,
+                        arrival_platform_name: None,
+                        departure_platform_name: None,
+                    }
+                ],
+            }),
+        };
+
+        let siri = SiriResponse {
+            siri: Siri {
+                service_delivery: ServiceDelivery {
+                    estimated_timetable_delivery: vec![EstimatedTimetableDelivery {
+                        estimated_journey_version_frame: vec![EstimatedJourneyVersionFrame {
+                            estimated_vehicle_journey: vec![journey],
+                        }],
+                    }],
+                },
+            },
+        };
+
+        let feed = super::process_siri(state.clone(), siri).await;
+        
+        assert_eq!(feed.entity.len(), 1);
+        let update = feed.entity[0].trip_update.as_ref().unwrap();
+        assert!(update.stop_time_update.is_empty());
+    }
 }

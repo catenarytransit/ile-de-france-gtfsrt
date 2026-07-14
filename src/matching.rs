@@ -1245,4 +1245,97 @@ mod tests {
         assert_eq!(call.matching_arrival(), Some(100));
         assert_eq!(call.matching_departure(), Some(110));
     }
+
+    #[test]
+    fn resolves_sncf_stop_area_to_namespaced_gtfs_stop() {
+        use gtfs_structures::Stop;
+        use std::collections::BTreeMap;
+        let mut stops = BTreeMap::new();
+        stops.insert("IDFM:monomodalStopPlace:47874".to_string(), Stop {
+            id: "IDFM:monomodalStopPlace:47874".to_string(),
+            ..Default::default()
+        });
+        let gtfs = Gtfs {
+            stops,
+            ..Default::default()
+        };
+        let index = GtfsMatchIndex::build(&gtfs);
+        let resolved = index.resolve_siri_stop_ids("STIF:StopArea:SP:47874:");
+        assert_eq!(resolved, vec!["IDFM:monomodalStopPlace:47874".to_string()]);
+    }
+
+    #[test]
+    fn exact_trip_without_stop_alignment_is_rejected() {
+        use gtfs_structures::StopTime;
+        use std::collections::BTreeMap;
+        use crate::siri_models::{EstimatedVehicleJourney, EstimatedCalls, EstimatedCall, ValueWrapper};
+
+        let stop = Arc::new(Stop {
+            id: "IDFM:monomodalStopPlace:12345".to_string(),
+            ..Default::default()
+        });
+
+        let mut trips = BTreeMap::new();
+        trips.insert("some-uuid-trip-id".to_string(), Trip {
+            id: "some-uuid-trip-id".to_string(),
+            service_id: "service-id".to_string(),
+            route_id: "IDFM:route-id".to_string(),
+            stop_times: vec![StopTime {
+                stop,
+                arrival_time: None,
+                departure_time: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let mut stops = BTreeMap::new();
+        stops.insert("IDFM:monomodalStopPlace:12345".to_string(), Stop {
+            id: "IDFM:monomodalStopPlace:12345".to_string(),
+            ..Default::default()
+        });
+        stops.insert("IDFM:monomodalStopPlace:47874".to_string(), Stop {
+            id: "IDFM:monomodalStopPlace:47874".to_string(),
+            ..Default::default()
+        });
+
+        let gtfs = Gtfs {
+            trips,
+            stops,
+            ..Default::default()
+        };
+        let index = GtfsMatchIndex::build(&gtfs);
+
+        let journey = EstimatedVehicleJourney {
+            dated_vehicle_journey_ref: Some(ValueWrapper {
+                value: Some("SIRI::some-uuid-trip-id".to_string()),
+            }),
+            line_ref: Some(ValueWrapper {
+                value: Some("STIF:Line::route-id:".to_string()),
+            }),
+            operator_ref: None,
+            direction_ref: None,
+            direction_name: None,
+            destination_ref: None,
+            journey_note: None,
+            estimated_calls: Some(EstimatedCalls {
+                estimated_call: vec![EstimatedCall {
+                    stop_point_ref: Some(ValueWrapper {
+                        value: Some("STIF:StopPoint:Q:47874:".to_string()),
+                    }),
+                    aimed_arrival_time: None,
+                    aimed_departure_time: None,
+                    expected_arrival_time: None,
+                    expected_departure_time: None,
+                    arrival_status: None,
+                    departure_status: None,
+                    arrival_platform_name: None,
+                    departure_platform_name: None,
+                }],
+            }),
+        };
+
+        let result = index.match_journey(&journey, &gtfs);
+        assert!(result.is_err());
+    }
 }

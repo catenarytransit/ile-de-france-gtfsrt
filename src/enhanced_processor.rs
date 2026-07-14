@@ -478,3 +478,107 @@ async fn publish_and_cache_feed(state: Arc<AppState>, feed_msg: FeedMessage) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovered_update_replaces_malformed_strict_update() {
+        use crate::state::{AppState, PlatformInfo};
+        use gtfs_realtime::{FeedEntity, TripUpdate, TripDescriptor};
+        use std::sync::Arc;
+        use dashmap::DashMap;
+        use tokio::sync::RwLock;
+
+        let state = Arc::new(AppState {
+            gtfs: RwLock::new(None),
+            gtfs_rt_feed: RwLock::new(Arc::new(Default::default())),
+            trip_platforms: DashMap::new(),
+            vehicle_assignments: DashMap::new(),
+        });
+
+        let mut feed = gtfs_realtime::FeedMessage::default();
+        let mut strict_entity = FeedEntity::default();
+        strict_entity.id = "entity-1".to_string();
+        let mut trip_desc = TripDescriptor::default();
+        trip_desc.trip_id = Some("trip-123".to_string());
+        let mut trip_update = TripUpdate::default();
+        trip_update.trip = trip_desc;
+        strict_entity.trip_update = Some(trip_update);
+        feed.entity.push(strict_entity);
+
+        let mut recovered_entity = FeedEntity::default();
+        recovered_entity.id = "entity-recovered".to_string();
+        let mut rec_trip_desc = TripDescriptor::default();
+        rec_trip_desc.trip_id = Some("trip-123".to_string());
+        let mut rec_trip_update = TripUpdate::default();
+        rec_trip_update.trip = rec_trip_desc;
+        recovered_entity.trip_update = Some(rec_trip_update);
+
+        let recovered = vec![(recovered_entity.clone(), Some(("trip-123".to_string(), vec![PlatformInfo {
+            stop_id: "stop-1".to_string(),
+            platform_name: "platform-1".to_string(),
+        }])))];
+
+        let mut existing_trip_ids = feed
+            .entity
+            .iter()
+            .filter_map(|entity| entity.trip_update.as_ref())
+            .filter_map(|update| update.trip.trip_id.as_deref())
+            .map(str::to_owned)
+            .collect::<std::collections::HashSet<_>>();
+        let mut existing_entity_ids = feed
+            .entity
+            .iter()
+            .map(|entity| entity.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+
+        for (entity, platforms) in recovered {
+            let trip_id = entity
+                .trip_update
+                .as_ref()
+                .and_then(|update| update.trip.trip_id.as_deref())
+                .map(str::to_owned);
+
+            if let Some(trip_id_ref) = trip_id.as_deref() {
+                if let Some(existing_index) = feed.entity.iter().position(|existing| {
+                    existing
+                        .trip_update
+                        .as_ref()
+                        .and_then(|update| update.trip.trip_id.as_deref())
+                        == Some(trip_id_ref)
+                }) {
+                    feed.entity[existing_index] = entity;
+
+                    if let Some((trip_id, platforms)) = platforms {
+                        if !platforms.is_empty() {
+                            state.trip_platforms.insert(trip_id, platforms);
+                        }
+                    }
+
+                    continue;
+                }
+            }
+
+            if existing_entity_ids.contains(&entity.id) {
+                continue;
+            }
+
+            if let Some((trip_id, platforms)) = platforms {
+                if !platforms.is_empty() {
+                    state.trip_platforms.insert(trip_id, platforms);
+                }
+            }
+            if let Some(trip_id) = trip_id {
+                existing_trip_ids.insert(trip_id.clone());
+            }
+            existing_entity_ids.insert(entity.id.clone());
+            feed.entity.push(entity);
+        }
+
+        assert_eq!(feed.entity.len(), 1);
+        assert_eq!(feed.entity[0].id, "entity-recovered");
+        assert_eq!(state.trip_platforms.get("trip-123").unwrap().value()[0].stop_id, "stop-1");
+    }
+}
