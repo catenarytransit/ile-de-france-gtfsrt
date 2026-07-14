@@ -129,45 +129,44 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) -> FeedMessa
                                 Some(StopTimeScheduleRelationship::Skipped as i32);
                         }
 
-                        let siri_stop_id = call
+                        let has_stop_point_ref = call
                             .stop_point_ref
                             .as_ref()
-                            .and_then(|stop_ref| {
-                                stop_ref
-                                    .value
-                                    .as_deref()
-                                    .and_then(siri_stop_ref_to_gtfs_stop_id)
-                            });
+                            .and_then(|r| r.value.as_deref())
+                            .map(|val| !match_index.resolve_siri_stop_ids(val).is_empty())
+                            .unwrap_or(false);
 
-                        let gtfs_stop_id = siri_stop_id.as_ref().map(|siri_stop_id| {
-                            let matched_stop_id = matched
+                        if has_stop_point_ref {
+                            let gtfs_stop_id = matched
                                 .stop_indices
                                 .get(observed_call_index)
                                 .and_then(|stop_index| matched_trip?.stop_times.get(*stop_index))
                                 .map(|stop_time| stop_time.stop.id.clone());
+
                             observed_call_index += 1;
-                            matched_stop_id.unwrap_or_else(|| siri_stop_id.clone())
-                        });
 
-                        if let Some(gtfs_stop_id) = gtfs_stop_id {
-                            // Always emit an ID belonging to the selected static GTFS trip when
-                            // an exact or parent-station alignment supplied a stop_time index.
-                            stu.stop_id = Some(gtfs_stop_id.clone());
+                            if let Some(gtfs_stop_id) = gtfs_stop_id {
+                                stu.stop_id = Some(gtfs_stop_id.clone());
 
-                            let platform_name = call
-                                .departure_platform_name
-                                .as_ref()
-                                .or(call.arrival_platform_name.as_ref())
-                                .and_then(|value| value.value.as_deref());
+                                let platform_name = call
+                                    .departure_platform_name
+                                    .as_ref()
+                                    .or(call.arrival_platform_name.as_ref())
+                                    .and_then(|value| value.value.as_deref());
 
-                            if let Some(platform_name) = platform_name {
-                                if platform_name != "unknown" {
-                                    platforms.push(PlatformInfo {
-                                        stop_id: gtfs_stop_id,
-                                        platform_name: platform_name.to_string(),
-                                    });
+                                if let Some(platform_name) = platform_name {
+                                    if platform_name != "unknown" {
+                                        platforms.push(PlatformInfo {
+                                            stop_id: gtfs_stop_id,
+                                            platform_name: platform_name.to_string(),
+                                        });
+                                    }
                                 }
+                            } else {
+                                continue;
                             }
+                        } else {
+                            continue;
                         }
 
                         // Prefer a realtime prediction, but use the aimed schedule time
@@ -371,18 +370,13 @@ fn parse_siri_timestamp(value: &str) -> Option<i64> {
         .map(|date_time| date_time.timestamp())
 }
 
-fn siri_stop_ref_to_gtfs_stop_id(value: &str) -> Option<String> {
-    let stop_id = value.rsplit(':').find(|part| !part.is_empty())?;
-    Some(format!("IDFM:{stop_id}"))
-}
-
 fn is_cancelled_status(status: &str) -> bool {
     status.eq_ignore_ascii_case("CANCELLED") || status.eq_ignore_ascii_case("CANCELED")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{estimated_call_sort_key, is_cancelled_status, siri_stop_ref_to_gtfs_stop_id};
+    use super::{estimated_call_sort_key, is_cancelled_status};
     use crate::siri_models::{EstimatedCall, ValueWrapper};
 
     fn estimated_call(
@@ -424,14 +418,6 @@ mod tests {
         assert_eq!(
             stop_ids,
             vec!["early-expected", "middle", "late", "missing"]
-        );
-    }
-
-    #[test]
-    fn extracts_idfm_stop_id() {
-        assert_eq!(
-            siri_stop_ref_to_gtfs_stop_id("STIF:StopPoint:Q:30785:"),
-            Some("IDFM:30785".to_string())
         );
     }
 

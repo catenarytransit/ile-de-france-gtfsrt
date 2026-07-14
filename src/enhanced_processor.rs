@@ -134,11 +134,27 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
             .and_then(|update| update.trip.trip_id.as_deref())
             .map(str::to_owned);
 
-        if trip_id
-            .as_ref()
-            .is_some_and(|trip_id| existing_trip_ids.contains(trip_id))
-            || existing_entity_ids.contains(&entity.id)
-        {
+        if let Some(trip_id_ref) = trip_id.as_deref() {
+            if let Some(existing_index) = feed.entity.iter().position(|existing| {
+                existing
+                    .trip_update
+                    .as_ref()
+                    .and_then(|update| update.trip.trip_id.as_deref())
+                    == Some(trip_id_ref)
+            }) {
+                feed.entity[existing_index] = entity;
+
+                if let Some((trip_id, platforms)) = platforms {
+                    if !platforms.is_empty() {
+                        state.trip_platforms.insert(trip_id, platforms);
+                    }
+                }
+
+                continue;
+            }
+        }
+
+        if existing_entity_ids.contains(&entity.id) {
             continue;
         }
 
@@ -148,7 +164,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
             }
         }
         if let Some(trip_id) = trip_id {
-            existing_trip_ids.insert(trip_id);
+            existing_trip_ids.insert(trip_id.clone());
         }
         existing_entity_ids.insert(entity.id.clone());
         feed.entity.push(entity);

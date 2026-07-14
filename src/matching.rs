@@ -59,20 +59,18 @@ struct DirectionPattern {
 
 #[derive(Debug, Default)]
 pub struct GtfsMatchIndex {
-    /// Route ID -> unique ordered stop patterns -> trips using that pattern.
     directions: HashMap<String, Vec<DirectionPattern>>,
-    /// DatedVehicleJourneyRef suffix/full value -> possible GTFS trip IDs.
     exact_trip_ids: HashMap<String, Vec<String>>,
     trips_by_route: HashMap<String, Vec<String>>,
     route_timezones: HashMap<String, Tz>,
     service_exceptions: HashMap<String, HashMap<NaiveDate, bool>>,
-    /// Stop/platform/boarding-area ID -> top-most known parent station ID.
     canonical_stop_ids: HashMap<String, String>,
+    stop_ids_by_suffix: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug)]
 struct ObservedCall {
-    stop_id: String,
+    stop_aliases: Vec<String>,
     aimed_arrival: Option<i64>,
     aimed_departure: Option<i64>,
     expected_arrival: Option<i64>,
@@ -162,6 +160,20 @@ impl GtfsMatchIndex {
 
         let canonical_stop_ids = build_canonical_stop_ids(gtfs);
 
+        let mut stop_ids_by_suffix = HashMap::<String, Vec<String>>::new();
+        for stop_id in gtfs.stops.keys() {
+            if let Some(suffix) = stop_id.rsplit(':').next() {
+                stop_ids_by_suffix
+                    .entry(suffix.to_owned())
+                    .or_default()
+                    .push(stop_id.clone());
+            }
+        }
+        for ids in stop_ids_by_suffix.values_mut() {
+            ids.sort_unstable();
+            ids.dedup();
+        }
+
         let mut grouped_directions = HashMap::<(String, Vec<String>), Vec<String>>::new();
         let mut exact_trip_ids = HashMap::<String, Vec<String>>::new();
         let mut trips_by_route = HashMap::<String, Vec<String>>::new();
@@ -245,7 +257,19 @@ impl GtfsMatchIndex {
             route_timezones,
             service_exceptions,
             canonical_stop_ids,
+            stop_ids_by_suffix,
         }
+    }
+
+    pub fn resolve_siri_stop_ids(&self, value: &str) -> Vec<String> {
+        let Some(suffix) = siri_reference_suffix(value) else {
+            return Vec::new();
+        };
+
+        self.stop_ids_by_suffix
+            .get(suffix)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn trip_ids_for_route(&self, route_id: &str) -> &[String] {
@@ -268,7 +292,7 @@ impl GtfsMatchIndex {
         &self,
         journey: &EstimatedVehicleJourney,
     ) -> Option<StopAlignmentDiagnostics> {
-        let observed_calls = observed_calls(journey);
+        let observed_calls = self.observed_calls(journey);
         if observed_calls.is_empty() {
             return None;
         }
@@ -281,15 +305,17 @@ impl GtfsMatchIndex {
         let target_destination = journey
             .destination_ref
             .as_ref()
-            .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id));
+            .and_then(|reference| reference.value.as_deref())
+            .map(|dest_ref| self.resolve_siri_stop_ids(dest_ref))
+            .unwrap_or_default();
 
         let mut candidate_patterns = patterns.iter().collect::<Vec<_>>();
         let mut destination_filter_applied = false;
 
-        if let Some(destination) = target_destination.as_ref() {
+        if !target_destination.is_empty() {
             let exact = patterns
                 .iter()
-                .filter(|pattern| pattern.destination_stop_id == *destination)
+                .filter(|pattern| target_destination.contains(&pattern.destination_stop_id))
                 .collect::<Vec<_>>();
 
             if !exact.is_empty() {
@@ -299,7 +325,9 @@ impl GtfsMatchIndex {
                 let parent = patterns
                     .iter()
                     .filter(|pattern| {
-                        self.stops_equivalent(&pattern.destination_stop_id, destination)
+                        target_destination.iter().any(|dest| {
+                            self.stops_equivalent(&pattern.destination_stop_id, dest)
+                        })
                     })
                     .collect::<Vec<_>>();
 
@@ -311,8 +339,8 @@ impl GtfsMatchIndex {
         }
 
         let observed_stop_ids = observed_calls
-            .into_iter()
-            .map(|call| call.stop_id)
+            .iter()
+            .map(|call| call.stop_aliases.first().cloned().unwrap_or_default())
             .collect::<Vec<_>>();
         let candidate_stop_patterns = candidate_patterns
             .iter()
@@ -337,7 +365,7 @@ impl GtfsMatchIndex {
         journey: &EstimatedVehicleJourney,
         gtfs: &Gtfs,
     ) -> Result<JourneyMatch, MatchMissReason> {
-        let observed_calls = observed_calls(journey);
+        let observed_calls = self.observed_calls(journey);
 
         if let Some(exact_match) = self.match_exact_id(journey, gtfs, &observed_calls) {
             return Ok(exact_match);
@@ -364,7 +392,9 @@ impl GtfsMatchIndex {
         let target_destination = journey
             .destination_ref
             .as_ref()
-            .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id));
+            .and_then(|reference| reference.value.as_deref())
+            .map(|dest_ref| self.resolve_siri_stop_ids(dest_ref))
+            .unwrap_or_default();
 
         let mut candidates = indexed_trip_ids
             .iter()
@@ -382,7 +412,7 @@ impl GtfsMatchIndex {
             return None;
         }
 
-        if let Some(destination_stop_id) = target_destination.as_ref() {
+        if !target_destination.is_empty() {
             let destination_candidates = candidates
                 .iter()
                 .copied()
@@ -391,7 +421,9 @@ impl GtfsMatchIndex {
                         .get(*trip_id)
                         .and_then(|trip| trip.stop_times.last())
                         .is_some_and(|stop_time| {
-                            self.stops_equivalent(&stop_time.stop.id, destination_stop_id)
+                            target_destination.iter().any(|dest| {
+                                self.stops_equivalent(&stop_time.stop.id, dest)
+                            })
                         })
                 })
                 .collect::<Vec<_>>();
@@ -436,8 +468,7 @@ impl GtfsMatchIndex {
         let service_date = self.infer_service_date(trip, observed_calls, timezone, gtfs);
 
         let (stop_indices, used_parent_station_match) = self
-            .first_alignment_for_trip(trip, observed_calls)
-            .unwrap_or_default();
+            .first_alignment_for_trip(trip, observed_calls)?;
 
         Some(JourneyMatch {
             trip_id,
@@ -474,26 +505,39 @@ impl GtfsMatchIndex {
         let target_destination = journey
             .destination_ref
             .as_ref()
-            .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id));
+            .and_then(|reference| reference.value.as_deref())
+            .map(|dest_ref| self.resolve_siri_stop_ids(dest_ref))
+            .unwrap_or_default();
 
-        let exact_destination_patterns = target_destination.as_ref().map(|destination| {
-            patterns
+        let exact_destination_patterns = if !target_destination.is_empty() {
+            let exact = patterns
                 .iter()
-                .filter(|pattern| pattern.destination_stop_id == *destination)
-                .collect::<Vec<_>>()
-        });
-        let parent_destination_patterns = target_destination.as_ref().map(|destination| {
-            patterns
+                .filter(|pattern| target_destination.contains(&pattern.destination_stop_id))
+                .collect::<Vec<_>>();
+            (!exact.is_empty()).then_some(exact)
+        } else {
+            None
+        };
+
+        let parent_destination_patterns = if exact_destination_patterns.is_none() && !target_destination.is_empty() {
+            let parent = patterns
                 .iter()
-                .filter(|pattern| self.stops_equivalent(&pattern.destination_stop_id, destination))
-                .collect::<Vec<_>>()
-        });
+                .filter(|pattern| {
+                    target_destination.iter().any(|dest| {
+                        self.stops_equivalent(&pattern.destination_stop_id, dest)
+                    })
+                })
+                .collect::<Vec<_>>();
+            (!parent.is_empty()).then_some(parent)
+        } else {
+            None
+        };
 
         let candidate_patterns = match exact_destination_patterns {
-            Some(exact) if !exact.is_empty() => exact,
-            _ => match parent_destination_patterns {
-                Some(parent) if !parent.is_empty() => parent,
-                _ => patterns.iter().collect::<Vec<_>>(),
+            Some(exact) => exact,
+            None => match parent_destination_patterns {
+                Some(parent) => parent,
+                None => patterns.iter().collect::<Vec<_>>(),
             },
         };
 
@@ -690,6 +734,43 @@ impl GtfsMatchIndex {
     fn timezone_for_route(&self, route_id: &str) -> Tz {
         self.route_timezones.get(route_id).copied().unwrap_or(Paris)
     }
+
+    fn observed_calls(&self, journey: &EstimatedVehicleJourney) -> Vec<ObservedCall> {
+        journey
+            .estimated_calls
+            .as_ref()
+            .into_iter()
+            .flat_map(|calls| &calls.estimated_call)
+            .filter_map(|call| {
+                let siri_ref = call
+                    .stop_point_ref
+                    .as_ref()
+                    .and_then(|reference| reference.value.as_deref())?;
+
+                let stop_aliases = self.resolve_siri_stop_ids(siri_ref);
+                if stop_aliases.is_empty() {
+                    return None;
+                }
+
+                Some(ObservedCall {
+                    stop_aliases,
+                    aimed_arrival: call.aimed_arrival_time.as_deref().and_then(parse_timestamp),
+                    aimed_departure: call
+                        .aimed_departure_time
+                        .as_deref()
+                        .and_then(parse_timestamp),
+                    expected_arrival: call
+                        .expected_arrival_time
+                        .as_deref()
+                        .and_then(parse_timestamp),
+                    expected_departure: call
+                        .expected_departure_time
+                        .as_deref()
+                        .and_then(parse_timestamp),
+                })
+            })
+            .collect()
+    }
 }
 
 fn build_canonical_stop_ids(gtfs: &Gtfs) -> HashMap<String, String> {
@@ -738,37 +819,6 @@ fn extract_idfm_id(value: &str) -> Option<String> {
     Some(format!("IDFM:{id}"))
 }
 
-fn observed_calls(journey: &EstimatedVehicleJourney) -> Vec<ObservedCall> {
-    journey
-        .estimated_calls
-        .as_ref()
-        .into_iter()
-        .flat_map(|calls| &calls.estimated_call)
-        .filter_map(|call| {
-            let stop_id = call
-                .stop_point_ref
-                .as_ref()
-                .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id))?;
-
-            Some(ObservedCall {
-                stop_id,
-                aimed_arrival: call.aimed_arrival_time.as_deref().and_then(parse_timestamp),
-                aimed_departure: call
-                    .aimed_departure_time
-                    .as_deref()
-                    .and_then(parse_timestamp),
-                expected_arrival: call
-                    .expected_arrival_time
-                    .as_deref()
-                    .and_then(parse_timestamp),
-                expected_departure: call
-                    .expected_departure_time
-                    .as_deref()
-                    .and_then(parse_timestamp),
-            })
-        })
-        .collect()
-}
 
 fn parse_timestamp(value: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(value)
@@ -868,7 +918,6 @@ fn find_best_alignment(
 
     for c in 1..=num_calls {
         let observed_call = &observed_calls[c - 1];
-        let siri_stop_id = observed_call.stop_id.as_str();
 
         for s in 1..=num_stops {
             let mut best_score = dp[c][s - 1];
@@ -878,19 +927,21 @@ fn find_best_alignment(
                 let stop_time = &trip.stop_times[s - 1];
                 let gtfs_stop_id = stop_time.stop.id.as_str();
 
-                let matches = match mode {
-                    StopMatchMode::Exact => gtfs_stop_id == siri_stop_id,
-                    StopMatchMode::ParentStation => {
-                        canonical_stop_ids
-                            .get(gtfs_stop_id)
-                            .map(String::as_str)
-                            .unwrap_or(gtfs_stop_id)
-                            == canonical_stop_ids
-                                .get(siri_stop_id)
+                let matches = observed_call.stop_aliases.iter().any(|siri_stop_id| {
+                    match mode {
+                        StopMatchMode::Exact => gtfs_stop_id == siri_stop_id,
+                        StopMatchMode::ParentStation => {
+                            canonical_stop_ids
+                                .get(gtfs_stop_id)
                                 .map(String::as_str)
-                                .unwrap_or(siri_stop_id)
+                                .unwrap_or(gtfs_stop_id)
+                                == canonical_stop_ids
+                                    .get(siri_stop_id)
+                                    .map(String::as_str)
+                                    .unwrap_or(siri_stop_id)
+                        }
                     }
-                };
+                });
 
                 if matches {
                     let mut match_comparisons = 0;
@@ -988,24 +1039,26 @@ fn has_valid_alignment(
         dp[0][s] = true;
     }
     for c in 1..=num_calls {
-        let siri_stop_id = observed_calls[c - 1].stop_id.as_str();
+        let observed_call = &observed_calls[c - 1];
         for s in 1..=num_stops {
             let mut possible = dp[c][s - 1];
             if dp[c - 1][s - 1] {
                 let gtfs_stop_id = stop_ids[s - 1].as_str();
-                let matches = match mode {
-                    StopMatchMode::Exact => gtfs_stop_id == siri_stop_id,
-                    StopMatchMode::ParentStation => {
-                        canonical_stop_ids
-                            .get(gtfs_stop_id)
-                            .map(String::as_str)
-                            .unwrap_or(gtfs_stop_id)
-                            == canonical_stop_ids
-                                .get(siri_stop_id)
+                let matches = observed_call.stop_aliases.iter().any(|siri_stop_id| {
+                    match mode {
+                        StopMatchMode::Exact => gtfs_stop_id == siri_stop_id,
+                        StopMatchMode::ParentStation => {
+                            canonical_stop_ids
+                                .get(gtfs_stop_id)
                                 .map(String::as_str)
-                                .unwrap_or(siri_stop_id)
+                                .unwrap_or(gtfs_stop_id)
+                                == canonical_stop_ids
+                                    .get(siri_stop_id)
+                                    .map(String::as_str)
+                                    .unwrap_or(siri_stop_id)
+                        }
                     }
-                };
+                });
                 if matches {
                     possible = true;
                 }
@@ -1046,6 +1099,10 @@ fn scheduled_timestamps(service_date: NaiveDate, scheduled_seconds: u32, timezon
         }
         LocalResult::None => Vec::new(),
     }
+}
+
+fn siri_reference_suffix(value: &str) -> Option<&str> {
+    value.rsplit(':').find(|part| !part.is_empty())
 }
 
 #[cfg(test)]
@@ -1114,7 +1171,7 @@ mod tests {
 
     fn observed_call(stop_id: &str) -> ObservedCall {
         ObservedCall {
-            stop_id: stop_id.to_string(),
+            stop_aliases: vec![stop_id.to_string()],
             aimed_arrival: None,
             aimed_departure: None,
             expected_arrival: Some(0),
@@ -1178,7 +1235,7 @@ mod tests {
     #[test]
     fn aimed_times_take_precedence_over_expected_times() {
         let call = ObservedCall {
-            stop_id: "B".to_string(),
+            stop_aliases: vec!["B".to_string()],
             aimed_arrival: Some(100),
             aimed_departure: Some(110),
             expected_arrival: Some(130),
