@@ -58,7 +58,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                 }
 
                 let mut match_source = None;
-                let mut matched = adaptive_matching::match_journey(journey, gtfs, stop_alias_index);
+                let mut matched = adaptive_matching::match_journey(journey, gtfs, match_index, stop_alias_index);
                 if matched.is_some() {
                     match_source = Some("adaptive");
                 }

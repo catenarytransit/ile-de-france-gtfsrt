@@ -63,6 +63,7 @@ pub struct GtfsMatchIndex {
     directions: HashMap<String, Vec<DirectionPattern>>,
     /// DatedVehicleJourneyRef suffix/full value -> possible GTFS trip IDs.
     exact_trip_ids: HashMap<String, Vec<String>>,
+    trips_by_route: HashMap<String, Vec<String>>,
     route_timezones: HashMap<String, Tz>,
     service_exceptions: HashMap<String, HashMap<NaiveDate, bool>>,
     /// Stop/platform/boarding-area ID -> top-most known parent station ID.
@@ -163,8 +164,14 @@ impl GtfsMatchIndex {
 
         let mut grouped_directions = HashMap::<(String, Vec<String>), Vec<String>>::new();
         let mut exact_trip_ids = HashMap::<String, Vec<String>>::new();
+        let mut trips_by_route = HashMap::<String, Vec<String>>::new();
 
         for (trip_id, trip) in &gtfs.trips {
+            trips_by_route
+                .entry(trip.route_id.clone())
+                .or_default()
+                .push(trip_id.clone());
+
             if !trip.stop_times.is_empty() {
                 let stop_ids = trip
                     .stop_times
@@ -185,6 +192,10 @@ impl GtfsMatchIndex {
                     insert_exact_key(&mut exact_trip_ids, suffix, trip_id);
                 }
             }
+        }
+
+        for ids in trips_by_route.values_mut() {
+            ids.sort_unstable();
         }
 
         let mut directions = HashMap::<String, Vec<DirectionPattern>>::new();
@@ -230,10 +241,18 @@ impl GtfsMatchIndex {
         Self {
             directions,
             exact_trip_ids,
+            trips_by_route,
             route_timezones,
             service_exceptions,
             canonical_stop_ids,
         }
+    }
+
+    pub fn trip_ids_for_route(&self, route_id: &str) -> &[String] {
+        self.trips_by_route
+            .get(route_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub fn direction_count(&self) -> usize {
@@ -490,13 +509,12 @@ impl GtfsMatchIndex {
             let mut best_score: Option<CandidateScore> = None;
 
             for pattern in &candidate_patterns {
-                let alignments = alignment_indices(
+                if !has_valid_alignment(
                     &pattern.stop_ids,
                     observed_calls,
                     &self.canonical_stop_ids,
                     mode,
-                );
-                if alignments.is_empty() {
+                ) {
                     continue;
                 }
                 saw_alignment = true;
@@ -512,18 +530,14 @@ impl GtfsMatchIndex {
                         }
                         saw_active_service = true;
 
-                        for stop_indices in &alignments {
-                            let Some(score) = score_alignment(
-                                trip,
-                                observed_calls,
-                                stop_indices,
-                                *service_date,
-                                timezone,
-                                mode == StopMatchMode::ParentStation,
-                            ) else {
-                                continue;
-                            };
-
+                        if let Some(score) = find_best_alignment(
+                            trip,
+                            observed_calls,
+                            Some(*service_date),
+                            Some(timezone),
+                            &self.canonical_stop_ids,
+                            mode,
+                        ) {
                             if best_score
                                 .as_ref()
                                 .is_none_or(|best| score.is_better_than(best))
@@ -567,42 +581,23 @@ impl GtfsMatchIndex {
             return None;
         }
 
-        let trip_stop_ids = trip
-            .stop_times
-            .iter()
-            .map(|stop_time| stop_time.stop.id.as_str())
-            .collect::<Vec<_>>();
         let service_dates = candidate_service_dates(observed_calls, timezone)?;
 
         for mode in [StopMatchMode::Exact, StopMatchMode::ParentStation] {
-            let alignments = alignment_indices(
-                &trip_stop_ids,
-                observed_calls,
-                &self.canonical_stop_ids,
-                mode,
-            );
-            if alignments.is_empty() {
-                continue;
-            }
-
             let mut best_score: Option<CandidateScore> = None;
-            for stop_indices in alignments {
-                for service_date in &service_dates {
-                    if !self.service_runs_on(gtfs, &trip.service_id, *service_date) {
-                        continue;
-                    }
+            for service_date in &service_dates {
+                if !self.service_runs_on(gtfs, &trip.service_id, *service_date) {
+                    continue;
+                }
 
-                    let Some(score) = score_alignment(
-                        trip,
-                        observed_calls,
-                        &stop_indices,
-                        *service_date,
-                        timezone,
-                        mode == StopMatchMode::ParentStation,
-                    ) else {
-                        continue;
-                    };
-
+                if let Some(score) = find_best_alignment(
+                    trip,
+                    observed_calls,
+                    Some(*service_date),
+                    Some(timezone),
+                    &self.canonical_stop_ids,
+                    mode,
+                ) {
                     if best_score
                         .as_ref()
                         .is_none_or(|best| score.is_better_than(best))
@@ -629,19 +624,16 @@ impl GtfsMatchIndex {
             return None;
         }
 
-        let stop_ids = trip
-            .stop_times
-            .iter()
-            .map(|stop_time| stop_time.stop.id.as_str())
-            .collect::<Vec<_>>();
-
         for mode in [StopMatchMode::Exact, StopMatchMode::ParentStation] {
-            if let Some(indices) =
-                alignment_indices(&stop_ids, observed_calls, &self.canonical_stop_ids, mode)
-                    .into_iter()
-                    .next()
-            {
-                return Some((indices, mode == StopMatchMode::ParentStation));
+            if let Some(score) = find_best_alignment(
+                trip,
+                observed_calls,
+                None,
+                None,
+                &self.canonical_stop_ids,
+                mode,
+            ) {
+                return Some((score.stop_indices, mode == StopMatchMode::ParentStation));
             }
         }
 
@@ -810,183 +802,216 @@ fn candidate_service_dates(
             .filter_map(|days| local_date.checked_sub_signed(Duration::days(days)))
             .collect(),
     )
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DpScore {
+    total_difference: i128,
+    max_difference: i64,
+    comparisons: usize,
 }
 
-fn alignment_indices<S: AsRef<str>>(
-    stop_ids: &[S],
-    observed_calls: &[ObservedCall],
-    canonical_stop_ids: &HashMap<String, String>,
-    mode: StopMatchMode,
-) -> Vec<Vec<usize>> {
-    // Repeated stops and parent-station matching can produce C(n, k)
-    // subsequence alignments. The old implementation materialized every one,
-    // which could keep process_siri busy for minutes or effectively forever.
-    //
-    // Keep a bounded sample for time scoring, and memoize states that cannot
-    // reach a complete alignment. This bounds successful searches and makes
-    // unsuccessful searches O(stop_count * observed_call_count).
-    const MAX_ALIGNMENTS_PER_PATTERN: usize = 64;
+impl DpScore {
+    fn is_better_than(&self, other: &Self) -> bool {
+        match (self.comparisons, other.comparisons) {
+            (0, 0) => false,
+            (0, _) => false,
+            (_, 0) => true,
+            (self_comp, other_comp) => {
+                let self_total = self.total_difference;
+                let other_total = other.total_difference;
+                let self_mean_less = self_total * (other_comp as i128) < other_total * (self_comp as i128);
+                let self_mean_eq = self_total * (other_comp as i128) == other_total * (self_comp as i128);
 
-    let mut alignments = Vec::new();
-    let mut current = Vec::with_capacity(observed_calls.len());
-    let mut dead_states = HashSet::new();
-    collect_alignment_indices(
-        stop_ids,
-        observed_calls,
-        canonical_stop_ids,
-        mode,
-        0,
-        0,
-        &mut current,
-        &mut alignments,
-        &mut dead_states,
-        MAX_ALIGNMENTS_PER_PATTERN,
-    );
-    alignments
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_alignment_indices<S: AsRef<str>>(
-    stop_ids: &[S],
-    observed_calls: &[ObservedCall],
-    canonical_stop_ids: &HashMap<String, String>,
-    mode: StopMatchMode,
-    call_index: usize,
-    search_from: usize,
-    current: &mut Vec<usize>,
-    alignments: &mut Vec<Vec<usize>>,
-    dead_states: &mut HashSet<(usize, usize)>,
-    max_alignments: usize,
-) -> bool {
-    if alignments.len() >= max_alignments {
-        return true;
-    }
-
-    if call_index == observed_calls.len() {
-        alignments.push(current.clone());
-        return true;
-    }
-
-    let state = (call_index, search_from);
-    if dead_states.contains(&state) {
-        return false;
-    }
-
-    let remaining_calls = observed_calls.len() - call_index;
-    if stop_ids.len().saturating_sub(search_from) < remaining_calls {
-        dead_states.insert(state);
-        return false;
-    }
-
-    let last_candidate = stop_ids.len() - remaining_calls;
-    let mut found_completion = false;
-
-    for stop_index in search_from..=last_candidate {
-        let gtfs_stop_id = stop_ids[stop_index].as_ref();
-        let siri_stop_id = observed_calls[call_index].stop_id.as_str();
-        let matches = match mode {
-            StopMatchMode::Exact => gtfs_stop_id == siri_stop_id,
-            StopMatchMode::ParentStation => {
-                canonical_stop_ids
-                    .get(gtfs_stop_id)
-                    .map(String::as_str)
-                    .unwrap_or(gtfs_stop_id)
-                    == canonical_stop_ids
-                        .get(siri_stop_id)
-                        .map(String::as_str)
-                        .unwrap_or(siri_stop_id)
+                if self_mean_less {
+                    true
+                } else if self_mean_eq {
+                    if self.max_difference < other.max_difference {
+                        true
+                    } else if self.max_difference == other.max_difference {
+                        self_comp > other_comp
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
             }
-        };
-        if !matches {
-            continue;
-        }
-
-        current.push(stop_index);
-        found_completion |= collect_alignment_indices(
-            stop_ids,
-            observed_calls,
-            canonical_stop_ids,
-            mode,
-            call_index + 1,
-            stop_index + 1,
-            current,
-            alignments,
-            dead_states,
-            max_alignments,
-        );
-        current.pop();
-
-        if alignments.len() >= max_alignments {
-            break;
         }
     }
-
-    if !found_completion {
-        dead_states.insert(state);
-    }
-
-    found_completion
 }
 
-fn score_alignment(
+fn find_best_alignment(
     trip: &Trip,
     observed_calls: &[ObservedCall],
-    stop_indices: &[usize],
-    service_date: NaiveDate,
-    timezone: Tz,
-    used_parent_station_match: bool,
+    service_date: Option<NaiveDate>,
+    timezone: Option<Tz>,
+    canonical_stop_ids: &HashMap<String, String>,
+    mode: StopMatchMode,
 ) -> Option<CandidateScore> {
-    if stop_indices.len() != observed_calls.len() {
+    let num_calls = observed_calls.len();
+    let num_stops = trip.stop_times.len();
+    if num_calls == 0 || num_stops == 0 || num_stops < num_calls {
         return None;
     }
 
-    let mut total_difference: i128 = 0;
-    let mut max_difference = 0_i64;
-    let mut comparisons = 0_usize;
+    let mut dp = vec![vec![None; num_stops + 1]; num_calls + 1];
+    let mut predecessor = vec![vec![None; num_stops + 1]; num_calls + 1];
 
-    for (observed_call, stop_index) in observed_calls.iter().zip(stop_indices) {
-        let stop_time = trip.stop_times.get(*stop_index)?;
+    for s in 0..=num_stops {
+        dp[0][s] = Some(DpScore {
+            total_difference: 0,
+            max_difference: 0,
+            comparisons: 0,
+        });
+    }
 
-        if let (Some(observed), Some(scheduled_seconds)) = (
-            observed_call.matching_arrival(),
-            stop_time.arrival_time.or(stop_time.departure_time),
-        ) {
-            if let Some(difference) =
-                minimum_time_difference(observed, service_date, scheduled_seconds, timezone)
-            {
-                total_difference += i128::from(difference);
-                max_difference = max_difference.max(difference);
-                comparisons += 1;
+    for c in 1..=num_calls {
+        let observed_call = &observed_calls[c - 1];
+        let siri_stop_id = observed_call.stop_id.as_str();
+
+        for s in 1..=num_stops {
+            let mut best_score = dp[c][s - 1];
+            let mut best_pred = predecessor[c][s - 1];
+
+            if let Some(prev_score) = dp[c - 1][s - 1] {
+                let stop_time = &trip.stop_times[s - 1];
+                let gtfs_stop_id = stop_time.stop.id.as_str();
+
+                let matches = match mode {
+                    StopMatchMode::Exact => gtfs_stop_id == siri_stop_id,
+                    StopMatchMode::ParentStation => {
+                        canonical_stop_ids
+                            .get(gtfs_stop_id)
+                            .map(String::as_str)
+                            .unwrap_or(gtfs_stop_id)
+                            == canonical_stop_ids
+                                .get(siri_stop_id)
+                                .map(String::as_str)
+                                .unwrap_or(siri_stop_id)
+                    }
+                };
+
+                if matches {
+                    let mut match_comparisons = 0;
+                    let mut match_total_diff = 0;
+                    let mut match_max_diff = 0;
+
+                    if let (Some(date), Some(tz)) = (service_date, timezone) {
+                        if let (Some(observed), Some(scheduled_seconds)) = (
+                            observed_call.matching_arrival(),
+                            stop_time.arrival_time.or(stop_time.departure_time),
+                        ) {
+                            if let Some(difference) =
+                                minimum_time_difference(observed, date, scheduled_seconds, tz)
+                            {
+                                match_total_diff += difference;
+                                match_max_diff = match_max_diff.max(difference);
+                                match_comparisons += 1;
+                            }
+                        }
+
+                        if let (Some(observed), Some(scheduled_seconds)) = (
+                            observed_call.matching_departure(),
+                            stop_time.departure_time.or(stop_time.arrival_time),
+                        ) {
+                            if let Some(difference) =
+                                minimum_time_difference(observed, date, scheduled_seconds, tz)
+                            {
+                                match_total_diff += difference;
+                                match_max_diff = match_max_diff.max(difference);
+                                match_comparisons += 1;
+                            }
+                        }
+                    }
+
+                    let new_score = DpScore {
+                        total_difference: prev_score.total_difference + i128::from(match_total_diff),
+                        max_difference: prev_score.max_difference.max(match_max_diff),
+                        comparisons: prev_score.comparisons + match_comparisons,
+                    };
+
+                    if best_score.is_none() || new_score.is_better_than(&best_score.unwrap()) {
+                        best_score = Some(new_score);
+                        best_pred = Some(s - 1);
+                    }
+                }
             }
-        }
 
-        if let (Some(observed), Some(scheduled_seconds)) = (
-            observed_call.matching_departure(),
-            stop_time.departure_time.or(stop_time.arrival_time),
-        ) {
-            if let Some(difference) =
-                minimum_time_difference(observed, service_date, scheduled_seconds, timezone)
-            {
-                total_difference += i128::from(difference);
-                max_difference = max_difference.max(difference);
-                comparisons += 1;
-            }
+            dp[c][s] = best_score;
+            predecessor[c][s] = best_pred;
         }
     }
 
-    if comparisons == 0 {
+    let final_score = dp[num_calls][num_stops]?;
+
+    if service_date.is_some() && final_score.comparisons == 0 {
         return None;
+    }
+
+    let mut stop_indices = vec![0; num_calls];
+    let mut curr_s = num_stops;
+    for c in (1..=num_calls).rev() {
+        let stop_idx = predecessor[c][curr_s]?;
+        stop_indices[c - 1] = stop_idx;
+        curr_s = stop_idx;
     }
 
     Some(CandidateScore {
         trip_id: trip.id.clone(),
-        service_date,
-        mean_abs_difference_seconds: (total_difference / comparisons as i128) as i64,
-        max_abs_difference_seconds: max_difference,
-        comparisons,
-        stop_indices: stop_indices.to_vec(),
-        used_parent_station_match,
+        service_date: service_date.unwrap_or_else(|| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()),
+        mean_abs_difference_seconds: if final_score.comparisons > 0 {
+            (final_score.total_difference / final_score.comparisons as i128) as i64
+        } else {
+            0
+        },
+        max_abs_difference_seconds: final_score.max_difference,
+        comparisons: final_score.comparisons,
+        stop_indices,
+        used_parent_station_match: mode == StopMatchMode::ParentStation,
     })
+}
+
+fn has_valid_alignment(
+    stop_ids: &[String],
+    observed_calls: &[ObservedCall],
+    canonical_stop_ids: &HashMap<String, String>,
+    mode: StopMatchMode,
+) -> bool {
+    let num_calls = observed_calls.len();
+    let num_stops = stop_ids.len();
+    if num_stops < num_calls {
+        return false;
+    }
+    let mut dp = vec![vec![false; num_stops + 1]; num_calls + 1];
+    for s in 0..=num_stops {
+        dp[0][s] = true;
+    }
+    for c in 1..=num_calls {
+        let siri_stop_id = observed_calls[c - 1].stop_id.as_str();
+        for s in 1..=num_stops {
+            let mut possible = dp[c][s - 1];
+            if dp[c - 1][s - 1] {
+                let gtfs_stop_id = stop_ids[s - 1].as_str();
+                let matches = match mode {
+                    StopMatchMode::Exact => gtfs_stop_id == siri_stop_id,
+                    StopMatchMode::ParentStation => {
+                        canonical_stop_ids
+                            .get(gtfs_stop_id)
+                            .map(String::as_str)
+                            .unwrap_or(gtfs_stop_id)
+                            == canonical_stop_ids
+                                .get(siri_stop_id)
+                                .map(String::as_str)
+                                .unwrap_or(siri_stop_id)
+                    }
+                };
+                if matches {
+                    possible = true;
+                }
+            }
+            dp[c][s] = possible;
+        }
+    }
+    dp[num_calls][num_stops]
 }
 
 fn minimum_time_difference(
@@ -1024,17 +1049,65 @@ fn scheduled_timestamps(service_date: NaiveDate, scheduled_seconds: u32, timezon
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gtfs_structures::{StopTime, Stop};
+    use std::sync::Arc;
+
+    fn make_dummy_trip<S: AsRef<str>>(stop_ids: &[S]) -> Trip {
+        let stop_times = stop_ids
+            .iter()
+            .map(|stop_id| StopTime {
+                stop: Arc::new(Stop {
+                    id: stop_id.as_ref().to_string(),
+                    ..Default::default()
+                }),
+                arrival_time: None,
+                departure_time: None,
+                ..Default::default()
+            })
+            .collect();
+
+        Trip {
+            id: "dummy".to_string(),
+            service_id: "dummy".to_string(),
+            route_id: "dummy".to_string(),
+            stop_times,
+            ..Default::default()
+        }
+    }
 
     fn exact_alignments<S: AsRef<str>>(
         stop_ids: &[S],
         observed_calls: &[ObservedCall],
     ) -> Vec<Vec<usize>> {
-        alignment_indices(
-            stop_ids,
+        let trip = make_dummy_trip(stop_ids);
+        find_best_alignment(
+            &trip,
             observed_calls,
+            None,
+            None,
             &HashMap::new(),
             StopMatchMode::Exact,
         )
+        .map(|score| vec![score.stop_indices])
+        .unwrap_or_default()
+    }
+
+    fn parent_alignments<S: AsRef<str>>(
+        stop_ids: &[S],
+        observed_calls: &[ObservedCall],
+        canonical: &HashMap<String, String>,
+    ) -> Vec<Vec<usize>> {
+        let trip = make_dummy_trip(stop_ids);
+        find_best_alignment(
+            &trip,
+            observed_calls,
+            None,
+            None,
+            canonical,
+            StopMatchMode::ParentStation,
+        )
+        .map(|score| vec![score.stop_indices])
+        .unwrap_or_default()
     }
 
     fn observed_call(stop_id: &str) -> ObservedCall {
@@ -1065,7 +1138,7 @@ mod tests {
 
         assert_eq!(
             exact_alignments(&stop_ids, &observed_calls),
-            vec![vec![1, 4], vec![3, 4]]
+            vec![vec![1, 4]]
         );
     }
 
@@ -1088,15 +1161,13 @@ mod tests {
         ]);
 
         assert!(
-            alignment_indices(&stop_ids, &observed_calls, &canonical, StopMatchMode::Exact,)
-                .is_empty()
+            exact_alignments(&stop_ids, &observed_calls).is_empty()
         );
         assert_eq!(
-            alignment_indices(
+            parent_alignments(
                 &stop_ids,
                 &observed_calls,
                 &canonical,
-                StopMatchMode::ParentStation,
             ),
             vec![vec![0, 1]]
         );

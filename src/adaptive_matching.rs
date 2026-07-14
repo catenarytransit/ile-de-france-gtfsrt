@@ -85,6 +85,7 @@ impl AdaptiveScore {
 pub fn match_journey(
     journey: &EstimatedVehicleJourney,
     gtfs: &Gtfs,
+    match_index: &crate::matching::GtfsMatchIndex,
     aliases: &StopAliasIndex,
 ) -> Option<JourneyMatch> {
     let route_id = journey
@@ -124,7 +125,8 @@ pub fn match_journey(
     for destination_mode in 0..=2 {
         let mut best: Option<AdaptiveScore> = None;
 
-        for trip in gtfs.trips.values().filter(|trip| trip.route_id == route_id) {
+        for trip_id in match_index.trip_ids_for_route(&route_id) {
+            let trip = &gtfs.trips[trip_id];
             if !destination_matches(trip, &destination_aliases, gtfs, destination_mode) {
                 continue;
             }
