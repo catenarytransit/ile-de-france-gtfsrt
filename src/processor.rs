@@ -386,7 +386,7 @@ mod tests {
     ) -> EstimatedCall {
         EstimatedCall {
             stop_point_ref: Some(ValueWrapper {
-                value: stop_id.to_string(),
+                value: Some(stop_id.to_string()),
             }),
             aimed_arrival_time: None,
             aimed_departure_time: aimed_departure.map(|value| value.to_string()),
