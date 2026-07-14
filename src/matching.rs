@@ -1249,12 +1249,12 @@ mod tests {
     #[test]
     fn resolves_sncf_stop_area_to_namespaced_gtfs_stop() {
         use gtfs_structures::Stop;
-        use std::collections::BTreeMap;
-        let mut stops = BTreeMap::new();
-        stops.insert("IDFM:monomodalStopPlace:47874".to_string(), Stop {
+        use std::collections::HashMap;
+        let mut stops = HashMap::new();
+        stops.insert("IDFM:monomodalStopPlace:47874".to_string(), Arc::new(Stop {
             id: "IDFM:monomodalStopPlace:47874".to_string(),
             ..Default::default()
-        });
+        }));
         let gtfs = Gtfs {
             stops,
             ..Default::default()
@@ -1267,7 +1267,7 @@ mod tests {
     #[test]
     fn exact_trip_without_stop_alignment_is_rejected() {
         use gtfs_structures::StopTime;
-        use std::collections::BTreeMap;
+        use std::collections::HashMap;
         use crate::siri_models::{EstimatedVehicleJourney, EstimatedCalls, EstimatedCall, ValueWrapper};
 
         let stop = Arc::new(Stop {
@@ -1275,7 +1275,7 @@ mod tests {
             ..Default::default()
         });
 
-        let mut trips = BTreeMap::new();
+        let mut trips = HashMap::new();
         trips.insert("some-uuid-trip-id".to_string(), Trip {
             id: "some-uuid-trip-id".to_string(),
             service_id: "service-id".to_string(),
@@ -1289,15 +1289,15 @@ mod tests {
             ..Default::default()
         });
 
-        let mut stops = BTreeMap::new();
-        stops.insert("IDFM:monomodalStopPlace:12345".to_string(), Stop {
+        let mut stops = HashMap::new();
+        stops.insert("IDFM:monomodalStopPlace:12345".to_string(), Arc::new(Stop {
             id: "IDFM:monomodalStopPlace:12345".to_string(),
             ..Default::default()
-        });
-        stops.insert("IDFM:monomodalStopPlace:47874".to_string(), Stop {
+        }));
+        stops.insert("IDFM:monomodalStopPlace:47874".to_string(), Arc::new(Stop {
             id: "IDFM:monomodalStopPlace:47874".to_string(),
             ..Default::default()
-        });
+        }));
 
         let gtfs = Gtfs {
             trips,
