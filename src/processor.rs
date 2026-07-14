@@ -430,8 +430,8 @@ mod tests {
     }
 
     #[tokio::test]
-    fn rail_trip_updates_only_use_static_trip_stop_ids() {
-        use std::collections::BTreeMap;
+    async fn rail_trip_updates_only_use_static_trip_stop_ids() {
+        use std::collections::HashMap;
         use std::sync::Arc;
         use dashmap::DashMap;
         use gtfs_structures::{StopTime, Stop, Trip, Gtfs};
@@ -448,7 +448,7 @@ mod tests {
             ..Default::default()
         });
 
-        let mut trips = BTreeMap::new();
+        let mut trips = HashMap::new();
         trips.insert("trip-1".to_string(), Trip {
             id: "trip-1".to_string(),
             service_id: "service-1".to_string(),
@@ -462,15 +462,15 @@ mod tests {
             ..Default::default()
         });
 
-        let mut stops = BTreeMap::new();
-        stops.insert("IDFM:monomodalStopPlace:12345".to_string(), Stop {
+        let mut stops = HashMap::new();
+        stops.insert("IDFM:monomodalStopPlace:12345".to_string(), Arc::new(Stop {
             id: "IDFM:monomodalStopPlace:12345".to_string(),
             ..Default::default()
-        });
-        stops.insert("IDFM:monomodalStopPlace:47874".to_string(), Stop {
+        }));
+        stops.insert("IDFM:monomodalStopPlace:47874".to_string(), Arc::new(Stop {
             id: "IDFM:monomodalStopPlace:47874".to_string(),
             ..Default::default()
-        });
+        }));
 
         let gtfs = Gtfs {
             trips,
