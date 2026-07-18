@@ -17,6 +17,13 @@ use state::AppState;
 use std::sync::Arc;
 use warp::Filter;
 
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 const GTFS_URL: &str = "https://eu.ftp.opendatasoft.com/stif/GTFS/IDFM-gtfs.zip";
 const SIRI_URL: &str =
     "https://prim.iledefrance-mobilites.fr/marketplace/estimated-timetable?LineRef=ALL";
