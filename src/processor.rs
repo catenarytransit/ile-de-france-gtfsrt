@@ -477,7 +477,7 @@ mod tests {
         let loaded = Arc::new(LoadedGtfs::new(gtfs));
         let state = Arc::new(AppState {
             gtfs: tokio::sync::RwLock::new(Some(loaded)),
-            gtfs_rt_feed: tokio::sync::RwLock::new(Arc::new(Default::default())),
+            gtfs_rt_feed: tokio::sync::RwLock::new(Arc::new(Vec::new())),
             trip_platforms: DashMap::new(),
             vehicle_assignments: DashMap::new(),
         });
