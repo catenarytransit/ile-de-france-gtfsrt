@@ -99,7 +99,6 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) -> FeedMessa
                     total_mean_difference_seconds += i128::from(difference);
                 }
 
-                let matched_trip = gtfs.trips.get(&matched.trip_id);
                 let trip_id = matched.trip_id.clone();
                 let mut trip_update = TripUpdate::default();
                 let mut trip_desc = TripDescriptor::default();
