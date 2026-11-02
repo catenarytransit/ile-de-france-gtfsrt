@@ -449,7 +449,8 @@ fn is_cancelled_status(status: &str) -> bool {
 }
 
 async fn publish_and_cache_feed(state: Arc<AppState>, feed_msg: FeedMessage) {
-    let feed_arc = Arc::new(feed_msg);
+    use prost::Message;
+    let feed_arc = Arc::new(feed_msg.encode_to_vec());
     {
         let mut lock = state.gtfs_rt_feed.write().await;
         *lock = feed_arc.clone();
@@ -460,15 +461,8 @@ async fn publish_and_cache_feed(state: Arc<AppState>, feed_msg: FeedMessage) {
         .unwrap_or_else(|_| std::path::PathBuf::from("./gtfs-rt.pb"));
 
     tokio::spawn(async move {
-        use prost::Message;
-        let mut buf = Vec::new();
-        if let Err(e) = feed_arc.encode(&mut buf) {
-            eprintln!("Failed to encode GTFS-RT feed for caching: {e}");
-            return;
-        }
-
         let temp_path = cache_path.with_extension("pb.tmp");
-        if let Err(e) = tokio::fs::write(&temp_path, buf).await {
+        if let Err(e) = tokio::fs::write(&temp_path, feed_arc.as_slice()).await {
             eprintln!("Failed to write temporary GTFS-RT cache file {}: {e}", temp_path.display());
             return;
         }
@@ -493,7 +487,7 @@ mod tests {
 
         let state = Arc::new(AppState {
             gtfs: RwLock::new(None),
-            gtfs_rt_feed: RwLock::new(Arc::new(Default::default())),
+            gtfs_rt_feed: RwLock::new(Arc::new(Vec::new())),
             trip_platforms: DashMap::new(),
             vehicle_assignments: DashMap::new(),
         });
