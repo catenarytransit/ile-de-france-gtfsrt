@@ -1,5 +1,6 @@
 use crate::adaptive_matching::StopAliasIndex;
 use crate::matching::GtfsMatchIndex;
+use crate::maple_syrup::MapleSyrup;
 use chrono::NaiveDate;
 use dashmap::DashMap;
 use gtfs_realtime::FeedMessage;
@@ -26,16 +27,22 @@ pub struct LoadedGtfs {
     pub gtfs: Gtfs,
     pub match_index: GtfsMatchIndex,
     pub stop_alias_index: StopAliasIndex,
+    pub maple: MapleSyrup,
 }
 
 impl LoadedGtfs {
-    pub fn new(gtfs: Gtfs) -> Self {
-        let match_index = GtfsMatchIndex::build(&gtfs);
+    pub fn new(mut gtfs: Gtfs) -> Self {
+        let mut match_index = GtfsMatchIndex::build(&gtfs);
         let stop_alias_index = StopAliasIndex::build(&gtfs);
+        let maple = MapleSyrup::compress(&mut gtfs);
+        match_index.sort_trip_starts(&maple);
+        let (trips, patterns, stops) = maple.stats();
+        println!("Maple Syrup: {trips} trips, {patterns} unique itineraries, {stops} stop-times compressed");
         Self {
             gtfs,
             match_index,
             stop_alias_index,
+            maple,
         }
     }
 }

@@ -40,6 +40,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
     let gtfs = &loaded_gtfs.gtfs;
     let match_index = &loaded_gtfs.match_index;
     let stop_alias_index = &loaded_gtfs.stop_alias_index;
+    let maple = &loaded_gtfs.maple;
     let now = Utc::now().timestamp();
     let mut recovered = Vec::<(FeedEntity, Option<(String, Vec<PlatformInfo>)>)>::new();
     let mut adaptive_matches = 0_u64;
@@ -52,13 +53,13 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                 let mut strict_view = journey.clone();
                 sort_for_strict_matcher(&mut strict_view);
 
-                if let Ok(matched) = match_index.match_journey(&strict_view, gtfs) {
+                if let Ok(matched) = match_index.match_journey(&strict_view, gtfs, maple) {
                     remember_assignment(&state, journey, &matched, gtfs, now);
                     continue;
                 }
 
                 let mut match_source = None;
-                let mut matched = adaptive_matching::match_journey(journey, gtfs, match_index, stop_alias_index);
+                let mut matched = adaptive_matching::match_journey(journey, gtfs, maple, match_index, stop_alias_index);
                 if matched.is_some() {
                     match_source = Some("adaptive");
                 }
@@ -72,6 +73,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                                 matched = adaptive_matching::match_cached_assignment(
                                     journey,
                                     gtfs,
+                                    maple,
                                     stop_alias_index,
                                     &assignment.trip_id,
                                 );
@@ -84,7 +86,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                 }
 
                 if let Some(matched) = matched {
-                    if let Some((entity, platforms)) = build_matched_entity(journey, &matched, gtfs)
+                    if let Some((entity, platforms)) = build_matched_entity(journey, &matched, gtfs, maple)
                     {
                         remember_assignment(&state, journey, &matched, gtfs, now);
                         recovered.push((entity, platforms));
@@ -216,6 +218,7 @@ fn build_matched_entity(
     journey: &EstimatedVehicleJourney,
     matched: &JourneyMatch,
     gtfs: &Gtfs,
+    maple: &crate::maple_syrup::MapleSyrup,
 ) -> Option<(FeedEntity, Option<(String, Vec<PlatformInfo>)>)> {
     let trip = gtfs.trips.get(&matched.trip_id)?;
     let calls = journey.estimated_calls.as_ref()?;
@@ -237,11 +240,11 @@ fn build_matched_entity(
         if stop_index == usize::MAX {
             continue;
         }
-        let Some(stop_time) = trip.stop_times.get(stop_index) else {
+        let Some(stop_id) = maple.stop_id(&matched.trip_id, stop_index) else {
             continue;
         };
 
-        let stop_id = stop_time.stop.id.clone();
+        let stop_id = stop_id.to_owned();
         let mut stop_update = StopTimeUpdate::default();
         stop_update.stop_id = Some(stop_id.clone());
 

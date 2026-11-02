@@ -85,6 +85,7 @@ impl AdaptiveScore {
 pub fn match_journey(
     journey: &EstimatedVehicleJourney,
     gtfs: &Gtfs,
+    maple: &crate::maple_syrup::MapleSyrup,
     match_index: &crate::matching::GtfsMatchIndex,
     aliases: &StopAliasIndex,
 ) -> Option<JourneyMatch> {
@@ -126,8 +127,8 @@ pub fn match_journey(
         let mut best: Option<AdaptiveScore> = None;
 
         for trip_id in match_index.trip_ids_for_route(&route_id) {
-            let trip = &gtfs.trips[trip_id];
-            if !destination_matches(trip, &destination_aliases, gtfs, destination_mode) {
+            let Some(trip) = maple.trip(gtfs, trip_id) else { continue };
+            if !destination_matches(&trip, &destination_aliases, gtfs, destination_mode) {
                 continue;
             }
 
@@ -138,7 +139,7 @@ pub fn match_journey(
 
                 let score = if operator_trajectory {
                     score_operator_trajectory(
-                        trip,
+                        &trip,
                         &calls,
                         *service_date,
                         timezone,
@@ -149,7 +150,7 @@ pub fn match_journey(
                     )
                 } else {
                     score_unordered_calls(
-                        trip,
+                        &trip,
                         &calls,
                         *service_date,
                         timezone,
@@ -178,10 +179,11 @@ pub fn match_journey(
 pub fn match_cached_assignment(
     journey: &EstimatedVehicleJourney,
     gtfs: &Gtfs,
+    maple: &crate::maple_syrup::MapleSyrup,
     aliases: &StopAliasIndex,
     trip_id: &str,
 ) -> Option<JourneyMatch> {
-    let trip = gtfs.trips.get(trip_id)?;
+    let trip = maple.trip(gtfs, trip_id)?;
     let route_id = journey
         .line_ref
         .as_ref()
@@ -205,7 +207,7 @@ pub fn match_cached_assignment(
             continue;
         }
         let Some(score) = score_unordered_calls(
-            trip,
+            &trip,
             &calls,
             service_date,
             timezone,

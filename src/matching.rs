@@ -2,7 +2,8 @@ use crate::matching_diagnostics::{
     StopAlignmentDiagnostics, diagnose_stop_alignment as analyze_stop_alignment,
 };
 use crate::siri_models::EstimatedVehicleJourney;
-use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
+use crate::maple_syrup::MapleSyrup;
+use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
 use chrono_tz::{Europe::Paris, Tz};
 use gtfs_structures::{Exception, Gtfs, Trip};
 use std::collections::{HashMap, HashSet};
@@ -272,6 +273,18 @@ impl GtfsMatchIndex {
             .unwrap_or_default()
     }
 
+    /// Start-time sorted lists permit lower/upper-bound lookups without scanning
+    /// every Paris Metro trip's expanded stop_times.
+    pub fn sort_trip_starts(&mut self, maple: &MapleSyrup) {
+        for patterns in self.directions.values_mut() {
+            for pattern in patterns {
+                pattern.trip_ids.sort_unstable_by(|a, b| {
+                    maple.start_time(a).cmp(&maple.start_time(b)).then_with(|| a.cmp(b))
+                });
+            }
+        }
+    }
+
     pub fn trip_ids_for_route(&self, route_id: &str) -> &[String] {
         self.trips_by_route
             .get(route_id)
@@ -364,20 +377,22 @@ impl GtfsMatchIndex {
         &self,
         journey: &EstimatedVehicleJourney,
         gtfs: &Gtfs,
+        maple: &MapleSyrup,
     ) -> Result<JourneyMatch, MatchMissReason> {
         let observed_calls = self.observed_calls(journey);
 
-        if let Some(exact_match) = self.match_exact_id(journey, gtfs, &observed_calls) {
+        if let Some(exact_match) = self.match_exact_id(journey, gtfs, maple, &observed_calls) {
             return Ok(exact_match);
         }
 
-        self.match_direction_and_time(journey, gtfs, &observed_calls)
+        self.match_direction_and_time(journey, gtfs, maple, &observed_calls)
     }
 
     fn match_exact_id(
         &self,
         journey: &EstimatedVehicleJourney,
         gtfs: &Gtfs,
+        maple: &MapleSyrup,
         observed_calls: &[ObservedCall],
     ) -> Option<JourneyMatch> {
         let exact_key = journey
@@ -419,10 +434,10 @@ impl GtfsMatchIndex {
                 .filter(|trip_id| {
                     gtfs.trips
                         .get(*trip_id)
-                        .and_then(|trip| trip.stop_times.last())
-                        .is_some_and(|stop_time| {
+                        .and_then(|_| maple.last_stop_id(trip_id))
+                        .is_some_and(|stop_id| {
                             target_destination.iter().any(|dest| {
-                                self.stops_equivalent(&stop_time.stop.id, dest)
+                                self.stops_equivalent(stop_id, dest)
                             })
                         })
                 })
@@ -441,7 +456,7 @@ impl GtfsMatchIndex {
             };
             let timezone = self.timezone_for_route(&trip.route_id);
 
-            if let Some(score) = self.score_trip(trip, observed_calls, timezone, gtfs) {
+            if let Some(score) = self.score_trip(&maple.trip(gtfs, &trip.id)?, observed_calls, timezone, gtfs) {
                 if best_score
                     .as_ref()
                     .is_none_or(|best| score.is_better_than(best))
@@ -467,8 +482,9 @@ impl GtfsMatchIndex {
         let timezone = self.timezone_for_route(&trip.route_id);
         let service_date = self.infer_service_date(trip, observed_calls, timezone, gtfs);
 
+        let expanded = maple.trip(gtfs, &trip.id)?;
         let (stop_indices, used_parent_station_match) = self
-            .first_alignment_for_trip(trip, observed_calls)?;
+            .first_alignment_for_trip(&expanded, observed_calls)?;
 
         Some(JourneyMatch {
             trip_id,
@@ -484,6 +500,7 @@ impl GtfsMatchIndex {
         &self,
         journey: &EstimatedVehicleJourney,
         gtfs: &Gtfs,
+        maple: &MapleSyrup,
         observed_calls: &[ObservedCall],
     ) -> Result<JourneyMatch, MatchMissReason> {
         if observed_calls.is_empty() {
@@ -563,7 +580,32 @@ impl GtfsMatchIndex {
                 }
                 saw_alignment = true;
 
-                for trip_id in &pattern.trip_ids {
+                // A trip's first event must precede a matching observed call.
+                // Use a deliberately broad four-hour margin, and fall back to
+                // the full sorted list whenever the narrowed window has no match.
+                let first_observed = observed_calls.iter()
+                    .filter_map(|c| c.matching_arrival().or(c.matching_departure()))
+                    .min();
+                let ranges: Vec<&[String]> = if let Some(timestamp) = first_observed {
+                    // Use local wall-clock seconds since midnight (with the
+                    // previous service day considered for overnight trips).
+                    let local = timezone.timestamp_opt(timestamp, 0).single();
+                    if let Some(local) = local {
+                        let seconds = i64::from(local.time().num_seconds_from_midnight());
+                        let max_duration = pattern.trip_ids.iter()
+                            .filter_map(|id| maple.max_offset(id))
+                            .max().unwrap_or(0) as i64;
+                        let low = (seconds - max_duration - 4 * 3600).max(0) as u32;
+                        let high = (seconds + 4 * 3600 + 86400).max(0) as u32;
+                        let lo = pattern.trip_ids.partition_point(|id| maple.start_time(id).unwrap_or(0) < low);
+                        let hi = pattern.trip_ids.partition_point(|id| maple.start_time(id).unwrap_or(0) <= high);
+                        let narrowed = &pattern.trip_ids[lo..hi];
+                        // Search likely departures first, then both tails. The
+                        // remaining ranges preserve exact global best-match scoring.
+                        vec![narrowed, &pattern.trip_ids[..lo], &pattern.trip_ids[hi..]]
+                    } else { vec![&pattern.trip_ids] }
+                } else { vec![&pattern.trip_ids] };
+                for trip_id in ranges.into_iter().flatten() {
                     let Some(trip) = gtfs.trips.get(trip_id) else {
                         continue;
                     };
@@ -574,8 +616,9 @@ impl GtfsMatchIndex {
                         }
                         saw_active_service = true;
 
+                        if let Some(expanded) = maple.trip(gtfs, trip_id) {
                         if let Some(score) = find_best_alignment(
-                            trip,
+                            &expanded,
                             observed_calls,
                             Some(*service_date),
                             Some(timezone),
@@ -588,6 +631,7 @@ impl GtfsMatchIndex {
                             {
                                 best_score = Some(score);
                             }
+                        }
                         }
                     }
                 }
@@ -1335,7 +1379,9 @@ mod tests {
             }),
         };
 
-        let result = index.match_journey(&journey, &gtfs);
+        let mut compressed_gtfs = gtfs;
+        let maple = MapleSyrup::compress(&mut compressed_gtfs);
+        let result = index.match_journey(&journey, &compressed_gtfs, &maple);
         assert!(result.is_err());
     }
 }
