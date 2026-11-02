@@ -32,9 +32,10 @@ pub struct LoadedGtfs {
 
 impl LoadedGtfs {
     pub fn new(mut gtfs: Gtfs) -> Self {
-        let match_index = GtfsMatchIndex::build(&gtfs);
+        let mut match_index = GtfsMatchIndex::build(&gtfs);
         let stop_alias_index = StopAliasIndex::build(&gtfs);
         let maple = MapleSyrup::compress(&mut gtfs);
+        match_index.sort_trip_starts(&maple);
         let (trips, patterns, stops) = maple.stats();
         println!("Maple Syrup: {trips} trips, {patterns} unique itineraries, {stops} stop-times compressed");
         Self {
