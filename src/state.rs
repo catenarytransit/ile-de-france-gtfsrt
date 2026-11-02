@@ -1,4 +1,5 @@
 use crate::memory_optimisation::prune_gtfs_for_matching;
+use crate::adaptive_matching::StopAliasIndex;
 use crate::matching::GtfsMatchIndex;
 use chrono::NaiveDate;
 use dashmap::DashMap;
@@ -26,13 +27,15 @@ pub struct PlatformInfo {
 pub struct LoadedGtfs {
     pub gtfs: Gtfs,
     pub match_index: GtfsMatchIndex,
+    pub stop_alias_index: StopAliasIndex,
 }
 
 impl LoadedGtfs {
     pub fn new(mut gtfs: Gtfs) -> Self {
         prune_gtfs_for_matching(&mut gtfs);
         let match_index = GtfsMatchIndex::build(&gtfs);
-        Self { gtfs, match_index }
+        let stop_alias_index = StopAliasIndex::build(&gtfs);
+        Self { gtfs, match_index, stop_alias_index }
     }
 }
 
