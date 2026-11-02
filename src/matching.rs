@@ -2,6 +2,7 @@ use crate::matching_diagnostics::{
     StopAlignmentDiagnostics, diagnose_stop_alignment as analyze_stop_alignment,
 };
 use crate::siri_models::EstimatedVehicleJourney;
+use crate::maple_syrup::MapleSyrup;
 use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::{Europe::Paris, Tz};
 use gtfs_structures::{Exception, Gtfs, Trip};
@@ -364,20 +365,22 @@ impl GtfsMatchIndex {
         &self,
         journey: &EstimatedVehicleJourney,
         gtfs: &Gtfs,
+        maple: &MapleSyrup,
     ) -> Result<JourneyMatch, MatchMissReason> {
         let observed_calls = self.observed_calls(journey);
 
-        if let Some(exact_match) = self.match_exact_id(journey, gtfs, &observed_calls) {
+        if let Some(exact_match) = self.match_exact_id(journey, gtfs, maple, &observed_calls) {
             return Ok(exact_match);
         }
 
-        self.match_direction_and_time(journey, gtfs, &observed_calls)
+        self.match_direction_and_time(journey, gtfs, maple, &observed_calls)
     }
 
     fn match_exact_id(
         &self,
         journey: &EstimatedVehicleJourney,
         gtfs: &Gtfs,
+        maple: &MapleSyrup,
         observed_calls: &[ObservedCall],
     ) -> Option<JourneyMatch> {
         let exact_key = journey
@@ -419,10 +422,10 @@ impl GtfsMatchIndex {
                 .filter(|trip_id| {
                     gtfs.trips
                         .get(*trip_id)
-                        .and_then(|trip| trip.stop_times.last())
-                        .is_some_and(|stop_time| {
+                        .and_then(|_| maple.last_stop_id(trip_id))
+                        .is_some_and(|stop_id| {
                             target_destination.iter().any(|dest| {
-                                self.stops_equivalent(&stop_time.stop.id, dest)
+                                self.stops_equivalent(stop_id, dest)
                             })
                         })
                 })
@@ -441,7 +444,7 @@ impl GtfsMatchIndex {
             };
             let timezone = self.timezone_for_route(&trip.route_id);
 
-            if let Some(score) = self.score_trip(trip, observed_calls, timezone, gtfs) {
+            if let Some(score) = self.score_trip(&maple.trip(gtfs, &trip.id)?, observed_calls, timezone, gtfs) {
                 if best_score
                     .as_ref()
                     .is_none_or(|best| score.is_better_than(best))
@@ -467,8 +470,9 @@ impl GtfsMatchIndex {
         let timezone = self.timezone_for_route(&trip.route_id);
         let service_date = self.infer_service_date(trip, observed_calls, timezone, gtfs);
 
+        let expanded = maple.trip(gtfs, &trip.id)?;
         let (stop_indices, used_parent_station_match) = self
-            .first_alignment_for_trip(trip, observed_calls)?;
+            .first_alignment_for_trip(&expanded, observed_calls)?;
 
         Some(JourneyMatch {
             trip_id,
@@ -484,6 +488,7 @@ impl GtfsMatchIndex {
         &self,
         journey: &EstimatedVehicleJourney,
         gtfs: &Gtfs,
+        maple: &MapleSyrup,
         observed_calls: &[ObservedCall],
     ) -> Result<JourneyMatch, MatchMissReason> {
         if observed_calls.is_empty() {
@@ -574,8 +579,9 @@ impl GtfsMatchIndex {
                         }
                         saw_active_service = true;
 
+                        if let Some(expanded) = maple.trip(gtfs, trip_id) {
                         if let Some(score) = find_best_alignment(
-                            trip,
+                            &expanded,
                             observed_calls,
                             Some(*service_date),
                             Some(timezone),
@@ -588,6 +594,7 @@ impl GtfsMatchIndex {
                             {
                                 best_score = Some(score);
                             }
+                        }
                         }
                     }
                 }
@@ -1335,7 +1342,7 @@ mod tests {
             }),
         };
 
-        let result = index.match_journey(&journey, &gtfs);
+        let result = index.match_journey(&journey, &gtfs, &MapleSyrup::compress(&mut gtfs.clone()));
         assert!(result.is_err());
     }
 }
