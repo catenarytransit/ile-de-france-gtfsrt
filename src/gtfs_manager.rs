@@ -1,7 +1,7 @@
 use crate::state::{AppState, LoadedGtfs};
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use gtfs_structures::Gtfs;
+use gtfs_structures::{Gtfs, GtfsReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,7 +111,7 @@ async fn load_gtfs_from_disk(path: &Path) -> Result<Gtfs> {
     let path_buf = path.to_path_buf();
     let parse_path = path_buf.clone();
 
-    tokio::task::spawn_blocking(move || Gtfs::from_path(&parse_path))
+    tokio::task::spawn_blocking(move || GtfsReader::default().read_shapes(false).read_from_path(&parse_path))
         .await
         .context("GTFS parsing task panicked")?
         .with_context(|| format!("Failed to parse cached GTFS {}", path_buf.display()))
@@ -193,7 +193,7 @@ async fn download_validate_and_replace(url: &str, cache_path: &Path) -> Result<G
     // cache. A broken download can therefore never destroy the old cache.
     let parse_path = temporary_path.clone();
 
-    let gtfs = tokio::task::spawn_blocking(move || Gtfs::from_path(&parse_path))
+    let gtfs = tokio::task::spawn_blocking(move || GtfsReader::default().read_shapes(false).read_from_path(&parse_path))
         .await
         .context("GTFS parsing task panicked")?
         .with_context(|| {
