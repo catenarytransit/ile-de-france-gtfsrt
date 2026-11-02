@@ -3,6 +3,7 @@ mod downloader;
 mod enhanced_processor;
 mod gtfs_manager;
 mod keys;
+mod memory_optimisation;
 mod matching;
 mod matching_diagnostics;
 mod processor;
@@ -87,9 +88,8 @@ async fn main() -> Result<()> {
                 let lock = state.gtfs_rt_feed.read().await;
                 Arc::clone(&*lock)
             };
-            let mut buf = Vec::new();
-            msg.encode(&mut buf).unwrap();
-            warp::reply::with_header(buf, "content-type", "application/x-protobuf")
+            // Snapshot is already encoded; avoid reconstructing a protobuf on every GET.
+            warp::reply::with_header(msg.as_ref().clone(), "content-type", "application/x-protobuf")
         });
 
     // GET /platforms
