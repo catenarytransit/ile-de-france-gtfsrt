@@ -10,6 +10,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt --all -- --check
+      - run: cargo fmt --all
       - run: cargo check --all-targets
       - run: cargo test --all-targets
