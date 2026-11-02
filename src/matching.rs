@@ -273,6 +273,18 @@ impl GtfsMatchIndex {
             .unwrap_or_default()
     }
 
+    /// Start-time sorted lists permit lower/upper-bound lookups without scanning
+    /// every Paris Metro trip's expanded stop_times.
+    pub fn sort_trip_starts(&mut self, maple: &MapleSyrup) {
+        for patterns in self.directions.values_mut() {
+            for pattern in patterns {
+                pattern.trip_ids.sort_unstable_by(|a, b| {
+                    maple.start_time(a).cmp(&maple.start_time(b)).then_with(|| a.cmp(b))
+                });
+            }
+        }
+    }
+
     pub fn trip_ids_for_route(&self, route_id: &str) -> &[String] {
         self.trips_by_route
             .get(route_id)
@@ -568,7 +580,30 @@ impl GtfsMatchIndex {
                 }
                 saw_alignment = true;
 
-                for trip_id in &pattern.trip_ids {
+                // A trip's first event must precede a matching observed call.
+                // Use a deliberately broad four-hour margin, and fall back to
+                // the full sorted list whenever the narrowed window has no match.
+                let first_observed = observed_calls.iter()
+                    .filter_map(|c| c.matching_arrival().or(c.matching_departure()))
+                    .min();
+                let ranges: Vec<&[String]> = if let Some(timestamp) = first_observed {
+                    // Use local wall-clock seconds since midnight (with the
+                    // previous service day considered for overnight trips).
+                    let local = timezone.timestamp_opt(timestamp, 0).single();
+                    if let Some(local) = local {
+                        let seconds = i64::from(local.time().num_seconds_from_midnight());
+                        let max_duration = pattern.trip_ids.iter()
+                            .filter_map(|id| maple.max_offset(id))
+                            .max().unwrap_or(0) as i64;
+                        let low = (seconds - max_duration - 4 * 3600).max(0) as u32;
+                        let high = (seconds + 4 * 3600 + 86400).max(0) as u32;
+                        let lo = pattern.trip_ids.partition_point(|id| maple.start_time(id).unwrap_or(0) < low);
+                        let hi = pattern.trip_ids.partition_point(|id| maple.start_time(id).unwrap_or(0) <= high);
+                        let narrowed = &pattern.trip_ids[lo..hi];
+                        if narrowed.is_empty() { vec![&pattern.trip_ids] } else { vec![narrowed] }
+                    } else { vec![&pattern.trip_ids] }
+                } else { vec![&pattern.trip_ids] };
+                for trip_id in ranges.into_iter().flatten() {
                     let Some(trip) = gtfs.trips.get(trip_id) else {
                         continue;
                     };
