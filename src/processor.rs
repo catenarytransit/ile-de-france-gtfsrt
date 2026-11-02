@@ -47,6 +47,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) -> FeedMessa
 
     let gtfs = &loaded_gtfs.gtfs;
     let match_index = &loaded_gtfs.match_index;
+    let maple = &loaded_gtfs.maple;
 
     for delivery in siri.siri.service_delivery.estimated_timetable_delivery {
         for frame in delivery.estimated_journey_version_frame {
@@ -54,7 +55,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) -> FeedMessa
                 // IDFM does not consistently return EstimatedCall entries in journey order.
                 // Sort them by their absolute SIRI timestamps before stop-sequence matching.
                 sort_estimated_calls_by_time(&mut journey);
-                let matched = match match_index.match_journey(&journey, gtfs) {
+                let matched = match match_index.match_journey(&journey, gtfs, maple) {
                     Ok(matched) => matched,
                     Err(reason) => {
                         let stop_alignment = if reason == MatchMissReason::NoStopAlignment {
@@ -140,8 +141,8 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) -> FeedMessa
                             let gtfs_stop_id = matched
                                 .stop_indices
                                 .get(observed_call_index)
-                                .and_then(|stop_index| matched_trip?.stop_times.get(*stop_index))
-                                .map(|stop_time| stop_time.stop.id.clone());
+                                .and_then(|stop_index| maple.stop_id(&matched.trip_id, *stop_index))
+                                .map(str::to_owned);
 
                             observed_call_index += 1;
 
