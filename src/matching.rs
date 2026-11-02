@@ -600,7 +600,9 @@ impl GtfsMatchIndex {
                         let lo = pattern.trip_ids.partition_point(|id| maple.start_time(id).unwrap_or(0) < low);
                         let hi = pattern.trip_ids.partition_point(|id| maple.start_time(id).unwrap_or(0) <= high);
                         let narrowed = &pattern.trip_ids[lo..hi];
-                        if narrowed.is_empty() { vec![&pattern.trip_ids] } else { vec![narrowed] }
+                        // Search likely departures first, then both tails. The
+                        // remaining ranges preserve exact global best-match scoring.
+                        vec![narrowed, &pattern.trip_ids[..lo], &pattern.trip_ids[hi..]]
                     } else { vec![&pattern.trip_ids] }
                 } else { vec![&pattern.trip_ids] };
                 for trip_id in ranges.into_iter().flatten() {
@@ -1377,7 +1379,9 @@ mod tests {
             }),
         };
 
-        let result = index.match_journey(&journey, &gtfs, &MapleSyrup::compress(&mut gtfs.clone()));
+        let mut compressed_gtfs = gtfs;
+        let maple = MapleSyrup::compress(&mut compressed_gtfs);
+        let result = index.match_journey(&journey, &compressed_gtfs, &maple);
         assert!(result.is_err());
     }
 }
