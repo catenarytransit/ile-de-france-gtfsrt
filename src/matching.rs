@@ -3,7 +3,7 @@ use crate::matching_diagnostics::{
 };
 use crate::siri_models::EstimatedVehicleJourney;
 use crate::maple_syrup::MapleSyrup;
-use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
 use chrono_tz::{Europe::Paris, Tz};
 use gtfs_structures::{Exception, Gtfs, Trip};
 use std::collections::{HashMap, HashSet};
