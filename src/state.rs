@@ -5,7 +5,7 @@ use chrono::NaiveDate;
 use dashmap::DashMap;
 use gtfs_realtime::FeedMessage;
 use gtfs_structures::Gtfs;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -17,7 +17,7 @@ pub struct VehicleAssignment {
     pub last_seen_epoch: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformInfo {
     pub stop_id: String,
     pub platform_name: String,
