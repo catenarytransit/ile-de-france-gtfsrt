@@ -458,6 +458,14 @@ async fn publish_and_cache_feed(state: Arc<AppState>, feed_msg: FeedMessage) {
         *lock = feed_arc.clone();
     }
 
+    // Persist the latest platforms after strict and adaptive matching have both
+    // updated the map. The downloader processes feeds sequentially, so writes
+    // cannot race with another platform-cache persistence pass.
+    let platform_path = crate::platform_cache::cache_path();
+    if let Err(error) = crate::platform_cache::persist(&state, &platform_path).await {
+        eprintln!("Failed to persist platform cache: {error:#}");
+    }
+
     let cache_path = std::env::var("GTFS_RT_CACHE_PATH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("./gtfs-rt.pb"));
