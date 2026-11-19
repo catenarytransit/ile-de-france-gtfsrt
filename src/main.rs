@@ -7,6 +7,7 @@ mod matching;
 mod matching_diagnostics;
 mod maple_syrup;
 mod processor;
+mod platform_cache;
 mod siri_models;
 mod state;
 
@@ -69,6 +70,13 @@ async fn main() -> Result<()> {
 
         Arc::new(AppState::new(initial_feed))
     };
+
+    // Restore platform names before binding HTTP or starting SIRI polling.
+    let platform_path = platform_cache::cache_path();
+    match platform_cache::restore(&state, &platform_path).await {
+        Ok(count) => println!("Recovered {count} trip platform entries from {}", platform_path.display()),
+        Err(error) => eprintln!("Platform cache recovery failed; continuing with empty platforms: {error:#}"),
+    }
 
     // Start background GTFS update loop
     gtfs_manager::start_gtfs_updater(state.clone(), GTFS_URL.to_string()).await?;
